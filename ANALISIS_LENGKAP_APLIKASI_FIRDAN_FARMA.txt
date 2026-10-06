@@ -1,0 +1,912 @@
+ANALISIS LENGKAP APLIKASI APOTEK FIRDAN FARMA
+============================================================
+Tanggal analisis: 2 Oktober 2026
+Ruang lingkup: source code, konfigurasi, dokumentasi, data seed, skrip,
+serta inventaris paket distribusi yang tersedia di repository.
+
+PENTING TENTANG KELENGKAPAN
+Dokumen ini merangkum perilaku dan tujuan aplikasi berdasarkan isi repository.
+Ia tidak menyalin 679 baris nama obat satu per satu; daftar itu tetap berada di
+Data/initial_medicines.csv dan data_stok_obat_untuk_launching.md. Seluruh
+fitur dijelaskan berdasarkan kode yang ada. Pernyataan kebutuhan lama atau
+panduan yang tidak cocok dengan kode diberi label sebagai perbedaan, bukan
+dianggap sebagai fitur yang sudah berjalan. Build yang ada bukan bukti bahwa
+semua skenario telah lulus uji operasional.
+
+------------------------------------------------------------
+1. IDENTITAS APLIKASI
+------------------------------------------------------------
+Nama produk: Firdan Farma Desktop / Aplikasi Apotek Firdan Farma.
+Jenis: aplikasi desktop Windows untuk mendukung operasional apotek.
+Bahasa antarmuka: Bahasa Indonesia.
+Framework antarmuka: C# Windows Forms.
+Runtime target: .NET Framework 4.8 (net48), bahasa C# 7.3.
+Penyimpanan: satu database SQLite lokal.
+Mode kerja: fungsi pokok dirancang untuk berjalan offline tanpa server.
+Target deployment: Windows 7 SP1 dan Windows Windows versi lebih baru yang
+mendukung .NET Framework 4.8.
+Build platform yang dideklarasikan: AnyCPU, x86, dan x64; Prefer32Bit aktif.
+Excel: ClosedXML, file .xlsx.
+Struk: System.Drawing.Printing melalui printer Windows.
+Paket SQLite: System.Data.SQLite.Core 1.0.119 dengan native SQLite untuk x86
+serta x64.
+
+Ini merupakan sistem administrasi dan transaksi internal apotek, bukan aplikasi
+medis klinis. Kode tidak menyediakan rekam pasien, resep elektronik, diagnosis,
+interaksi obat, klaim asuransi, konsultasi, atau keputusan terapi. Aplikasi
+membantu mencatat barang dan penjualan, tetapi tidak menggantikan prosedur
+apoteker, validasi resep, peraturan farmasi, atau pertimbangan tenaga kesehatan.
+
+------------------------------------------------------------
+2. MASALAH OPERASIONAL YANG DITUJU
+------------------------------------------------------------
+Dokumen produk menyatakan aplikasi dibuat untuk membantu apotek mengatasi
+kebutuhan berikut:
+- Menjaga stok obat mudah diketahui dan tidak berubah tanpa jejak.
+- Mencatat obat datang dari supplier beserta faktur, batch, dan kedaluwarsa.
+- Mengurangi stok ketika penjualan terjadi dan mencegah stok negatif.
+- Mengutamakan batch yang kedaluwarsanya paling dekat (FEFO).
+- Memisahkan penjualan Tunai dan QRIS untuk rekap.
+- Mengikuti pergantian periode laporan apotek pada pukul 15.00, bukan pukul
+  00.00, tanpa menghapus transaksi sebelumnya.
+- Mencatat diskon, pembatalan, koreksi, dan stok opname secara terkontrol.
+- Membedakan wewenang staf operasional dengan pemilik/pengelola.
+- Memudahkan penelusuran siapa melakukan apa, kapan, dan perubahan apa yang
+  terjadi.
+- Menyediakan laporan Excel serta backup/restore lokal.
+
+Dokumen repository tidak memberikan analisis terukur atas kejadian atau
+kerugian historis apotek. Daftar di atas adalah kebutuhan dan risiko operasional
+yang hendak ditangani, bukan klaim bahwa masalah tertentu telah diukur sebelum
+aplikasi dibuat.
+
+Hubungan aplikasi dengan apotek sangat langsung:
+1. Supplier/PBF adalah sumber barang yang diterima.
+2. Obat dan kemasan adalah item master yang disimpan apotek.
+3. Batch/expired mewakili stok fisik yang perlu dipantau.
+4. Karyawan menjalankan transaksi kasir dan dapat diberi izin stok tertentu.
+5. Super Admin mengendalikan data, akun, koreksi, audit dan pemulihan.
+6. Penjualan menghasilkan penerimaan Tunai atau QRIS dan mengurangi stok.
+7. Laporan memberi rekap operasional; database lokal tetap sumber data utama.
+
+------------------------------------------------------------
+3. BATAS PRODUK: APA YANG BUKAN FITURNYA
+------------------------------------------------------------
+Fitur berikut disebut belum ada, belum final, atau bukan ruang lingkup saat ini:
+- Modul faktur pembelian menyeluruh. Yang ada adalah input stok masuk/faktur
+  sederhana agar barang dan batch dapat masuk ke persediaan.
+- Barcode scanner dan alur pemindaian barcode. Pencarian aplikasi menggunakan
+  teks nama/kode/kategori/satuan; tidak ada perangkat scanner khusus.
+- Sinkronisasi cloud atau server pusat.
+- Operasi multi-cabang.
+- Beberapa terminal kasir yang berbagi stok secara real-time.
+- Analitik bisnis lanjutan.
+- Pengelolaan utang/piutang supplier, purchase order dan rekonsiliasi rekening.
+- Tutup kas/rekonsiliasi kas aktual per shift secara khusus.
+- Retur pelanggan sebagai workflow tersendiri. Pembatalan transaksi bukan
+  pengganti otomatis seluruh prosedur retur fisik.
+- Manajemen pasien/resep atau fungsi klinis.
+- Pengiriman audit ke server, SIEM, syslog, atau penyimpanan immutable.
+
+Catatan batas produk penting: terdapat pembelian stok masuk dengan nomor
+faktur, tetapi ini tidak sama dengan sistem pembelian/faktur penuh. README dan
+PRD menyebut modul faktur penuh belum final.
+
+------------------------------------------------------------
+4. ALUR APLIKASI DARI DIBUKA SAMPAI DITUTUP
+------------------------------------------------------------
+4.1 Startup
+Program.cs mengaktifkan visual styles Windows Forms, menginisialisasi
+pengamatan jam lokal, lalu memanggil Database.Initialize(). Jika terjadi
+exception startup, aplikasi menampilkan pesan bahwa aplikasi gagal dijalankan.
+Setelah itu LoginForm ditampilkan. Login sukses membuka MainForm; pilihan
+Ganti Pengguna menutup sesi dan mengulang siklus login tanpa mematikan proses.
+
+4.2 Lokasi penyimpanan
+Database aktif:
+%LOCALAPPDATA%\FirdanFarma\firdan_farma.db
+
+Folder backup:
+%LOCALAPPDATA%\FirdanFarma\backup\
+
+AppPaths membuat folder aplikasi/backup ketika path terkait diminta. Data tidak
+disimpan pada server dan tidak otomatis tersinkron ke komputer lain.
+
+4.3 Header, jam dan periode
+MainForm menampilkan halaman, tanggal laporan aktif, informasi bahwa sekat
+laporan terjadi pukul 15:00, waktu awal sesi dan jam live. AppClock
+membandingkan lompatan jam Windows dengan Stopwatch. Jika selisih sekitar 60
+detik atau lebih, aplikasi menampilkan satu peringatan sesi bahwa jam Windows
+bergerak maju/mundur. Aplikasi tidak mengoreksi jam dan waktu bisnis tetap
+berasal dari komputer lokal.
+
+4.4 Penutupan
+Kode MainForm saat ini mencatat LOGOUT saat form utama ditutup. Tidak ada
+prompt FormClosing untuk export laporan sebelum keluar. Panduan dan blueprint
+lama menyebut pilihan Ya/Tidak/Batal untuk export saat close, tetapi klaim itu
+tidak sesuai implementasi MainForm saat ini. Laporan tetap dapat diexport
+manual melalui menu Laporan.
+
+------------------------------------------------------------
+5. PENGGUNA, LOGIN, ROLE DAN IZIN
+------------------------------------------------------------
+5.1 Akun development bawaan
+SUPER_ADMIN: username alfian, password awal alfian.
+KARYAWAN: username apotek01, password awal apotek01.
+Password awal wajib diganti sebelum digunakan di produksi. Akun ini adalah
+kredensial development yang diketahui dari source/dokumentasi.
+
+Jika database berisi akun alias lama admin1/admin atau karyawan, proses
+inisialisasi dapat mengubahnya ke akun standar dan memasang ulang password
+awal. Jika username standar sudah ada, EnsureDefaultAccounts tidak menggantinya.
+
+5.2 Hash password
+Password tidak disimpan sebagai teks biasa. PasswordHasher memakai PBKDF2-
+SHA256, salt acak 16 byte, hash 32 byte dan 120.000 iterasi. Nilai tersimpan
+berisi penanda algoritma, jumlah iterasi, salt dan hasil hash. Verifikasi
+menggunakan pembandingan fixed-time. Aturan password baru yang terlihat pada
+UserService: minimal 6 karakter; username minimal 3 karakter. Tidak terlihat
+MFA, pembatasan percobaan login, lockout bertahap atau pemeriksaan kompleksitas
+lain.
+
+5.3 Role
+SUPER_ADMIN adalah peran pemilik/pengelola dengan akses operasional sekaligus
+administrasi dan pengawasan.
+KARYAWAN adalah peran operasional harian.
+
+Di luar role, akun memiliki dua izin:
+- can_purchase: izin input stok masuk.
+- can_adjust_stock: izin koreksi stok.
+Super Admin selalu memperoleh kedua izin efektif. Karyawan mengikuti nilai
+permission yang diberikan Super Admin.
+
+5.4 Menu yang benar-benar dibangun MainForm
+Menu dasar: Beranda, Obat, Penjualan, Kartu Stok, Laporan, Aktivitas, Ganti
+Pengguna.
+Menu kondisional: Stok Opname hanya Super Admin; Koreksi Stok bagi akun dengan
+izin koreksi; Pengguna, Master Data dan Backup hanya Super Admin.
+Tombol Stok Masuk ada di halaman Obat dan hanya terlihat untuk akun berizin.
+Tidak ada menu sidebar terpisah bernama Pembelian pada MainForm saat ini.
+
+Hak Karyawan:
+- Login, lihat dashboard, cari/lihat obat aktif, jual Tunai/QRIS, cetak struk.
+- Membaca kartu stok; kolom User disembunyikan.
+- Melihat aktivitas dirinya sendiri; beberapa detail sensitif disembunyikan.
+- Membuka stok masuk hanya bila can_purchase efektif aktif.
+- Membuka koreksi stok hanya bila can_adjust_stock efektif aktif.
+- Tidak boleh mengelola master obat, kategori, supplier, user, backup/restore,
+  pembatalan penjualan atau audit rinci semua pengguna.
+- Tidak mendapat menu stok opname.
+
+Hak Super Admin:
+- Seluruh akses operasional, plus master obat, aktif/nonaktif obat, batch/
+  expired, kategori, supplier, user, laporan detail, backup/restore, opname,
+  pembatalan transaksi, semua aktivitas serta laporan audit.
+
+Otorisasi penting diulang pada service, bukan hanya menyembunyikan tombol:
+UserService.RequireSuper dan pemeriksaan permission pada MedicineService,
+TransactionService, ReportService, StockOpnameService, dan
+ExcelBackupService.RestoreDatabase.
+
+Pengelolaan user menjaga minimal satu Super Admin aktif, username unik,
+nama tampilan wajib, password akun baru wajib, password baru minimal enam
+karakter, akun yang sedang digunakan tidak boleh dinonaktifkan dan role akun
+aktif sendiri tidak boleh diturunkan selama sesi. Password tidak ditulis ke
+audit; audit hanya menyebut password diubah.
+
+------------------------------------------------------------
+6. MODUL OBAT DAN MASTER DATA
+------------------------------------------------------------
+6.1 Master obat
+Field operasional meliputi kode, nama, satuan, kategori, harga beli, harga
+jual, stok minimal, AWL, MSK, KLR, status aktif dan SISA yang dihitung. Query
+pencarian mencakup nama, kode, kategori dan satuan; hasil diprioritaskan untuk
+kecocokan nama/kode tepat dan prefix. Kode boleh kosong, nama wajib.
+
+Rumus:
+SISA = AWL + MSK - KLR
+AWL = stok awal; MSK = akumulasi stok masuk; KLR = akumulasi stok keluar.
+Constraint database menjaga AWL/MSK/KLR tidak negatif dan SISA tidak negatif.
+Harga beli/jual juga tidak boleh negatif.
+
+MedicinePanel yang sekarang:
+- Mencari obat dan menampilkan daftar aktif; Super Admin dapat melihat
+  nonaktif melalui checkbox.
+- Mengizinkan Super Admin mengubah master atau aktif/nonaktif.
+- Memiliki tombol Lihat Batch.
+- Memunculkan tombol Stok Masuk sesuai izin.
+- Tidak mempunyai tombol Tambah Obat langsung yang terlihat pada panel.
+  Obat baru dapat tercipta lewat stok masuk; MedicineDialog mendukung data baru
+  secara internal namun UI panel tidak menampilkan tombol tambah.
+- AWL hanya dapat diatur saat pembuatan; MSK/KLR tidak diubah dari form edit
+  agar ledger stok tidak dilewati.
+- Obat yang pernah digunakan dinonaktifkan (soft delete), bukan dihapus dari
+  histori.
+
+Skema masih menyimpan kolom kategori/supplier teks dan relasi id. Supplier
+terutama direkam di transaksi stok masuk; panduan menyatakan supplier bukan
+atribut master obat untuk alur baru. Kolom lama tetap ada untuk kompatibilitas.
+
+6.2 Kategori dan supplier
+Hanya Super Admin mengelola kategori dan supplier, dapat menambah/mengubah
+status aktif. Supplier memiliki nama, telepon dan alamat. Kategori/supplier
+juga dapat dibuat otomatis oleh helper service pada konteks stok masuk ketika
+nama baru diberikan. Nilai kosong tidak dipaksakan menjadi record.
+
+6.3 Batch dan expiry
+Satu obat dapat memiliki banyak batch. Batch menyimpan nomor, expiry, masuk,
+keluar, tersedia, supplier dan referensi pembelian. Halaman Obat dapat
+menampilkan saldo tiap batch. Super Admin dapat mengoreksi nomor batch dan
+expiry dengan alasan wajib, tindakan tercatat di audit. Expiry kosong
+mendapat perlakuan sebagai tidak diketahui/tidak ada expiry oleh validasi
+penjualan, sehingga dianggap dapat dijual; hal ini memerlukan disiplin input.
+
+------------------------------------------------------------
+7. DATA STOK AWAL DAN KAITANNYA DENGAN DATA APOTEK
+------------------------------------------------------------
+Sumber dokumen data awal disebut sebagai sheet Sheet1 dari file Excel
+penjualan mingguan bertanggal 31 Agustus sampai 5 September. Data digunakan
+untuk seed awal karena stok aplikasi sebelumnya kosong.
+
+Jumlah sesungguhnya yang diverifikasi di file teks/CSV:
+- 679 catatan produk.
+- initial_medicines.csv mempunyai 680 baris fisik: 1 header + 679 produk.
+- Kolom CSV: name, unit, purchase_price, sale_price, awl, msk, klr.
+- Script generate_initial_medicines.py menurunkan MSK/KLR agar AWL + MSK -
+  KLR sama dengan SISA yang ada di sumber; ia memeriksa 679 record.
+- Data produk di-embed ke assembly dan dipakai Database.Initialize.
+- Data awal CSV tidak membawa nomor faktur, supplier, batch fisik, atau tanggal
+  expired aktual.
+
+Pada seed, setiap produk dimasukkan ke medicines. Untuk SISA positif, aplikasi
+membuat batch sintetis bernama STOK-AWAL tanpa expiry dan mencatat mutasi
+STOK_AWAL. Stok dengan SISA nol tidak mendapat batch awal. Akibatnya, tanggal
+expiry barang awal perlu dimasukkan/koreksi sesuai kemasan nyata sebelum
+menganggap pemantauan expiry telah akurat. Batch STOK-AWAL tanpa expiry
+berstatus layak jual menurut kode.
+
+Catatan khusus dokumen sumber:
+- PERMEN ANTANGIN tercatat dengan nama sama tetapi unit PCS dan SACH serta
+  harga berbeda.
+- ZINC 60MG juga tercatat dengan unit FLES dan PCS serta harga berbeda.
+- Dua varian tersebut bukan duplikat jika unit/kemasan dipertimbangkan.
+- Ada 15 produk Fiesta konsinyasi yang unit aslinya kosong dan harga beli 0;
+  isi satuan perlu konfirmasi, dan konsinyasi memiliki perlakuan nilai modal
+  khusus di luar model stok sederhana.
+- Sumber menjelaskan data sebagai ekstraksi stok mingguan, bukan jaminan
+  bahwa semua harga/stok/expiry telah diverifikasi ulang sebelum go-live.
+
+RISIKO IDENTITAS PRODUK: helper FindMedicineIdByName menormalisasi nama/kode
+menghapus spasi, tanda hubung, titik, tetapi tidak memakai unit sebagai bagian
+kunci. Untuk dua variasi nama identik di atas, stok masuk melalui pencocokan
+nama dapat mengarah ke record pertama dan berpotensi menyatukan kemasan
+berbeda. Sumber data sendiri sudah memperingatkan agar identitas memakai
+nama + satuan; implementasi pencarian otomatis belum mengikuti prinsip itu.
+Perlu pemilihan obat eksplisit atau identitas kode yang tidak ambigu.
+
+------------------------------------------------------------
+8. STOK MASUK DARI SUPPLIER / FAKTUR
+------------------------------------------------------------
+Stok Masuk dibuka dari Obat. Ada dua mode.
+
+A. Tunggal
+Untuk satu obat. Supplier dan nomor referensi opsional. Nama, satuan, jumlah,
+harga faktur, diskon per satuan, harga jual, batch dan expiry dapat dimasukkan.
+Obat baru dapat dibuat otomatis. Jika batch kosong, service membuat nomor
+TANPA-BATCH berdasarkan nomor stok masuk dan nomor baris. Expiry boleh kosong,
+tetapi jika diisi tidak boleh sudah lewat.
+
+B. Batch (Faktur)
+Untuk banyak barang dari satu faktur fisik. UI mewajibkan nama supplier/sumber
+dan nomor faktur. Baris berisi obat, satuan, kuantitas, harga faktur, diskon,
+PPN, harga beli final, harga jual, batch dan expiry. Nomor faktur yang sama
+pada pembelian SELESAI ditolak tanpa membedakan huruf besar/kecil. Header dan
+seluruh baris disimpan dalam transaksi SQLite.
+
+Harga dan total:
+- Nilai bersih unit = max(0, harga faktur - diskon).
+- PPN item dapat dihitung sesuai persentase; UI menampilkan opsi PPN 11% di
+  akhir faktur untuk mode Batch.
+- Harga beli final dan total faktur dipakai saat update master serta laporan.
+- Harga jual otomatis awalnya disarankan 120% dari harga beli final, dibulatkan
+  ke atas ke kelipatan Rp100; operator dapat mematikan auto dan mengisi manual.
+- Setiap baris boleh memiliki harga jual berbeda.
+
+Saat transaksi disimpan:
+- Jika obat belum ditemukan, obat dibuat; jika ditemukan, beberapa field
+  master seperti nama/satuan/harga diselaraskan dan statusnya diaktifkan.
+- Supplier dapat dibuat bila nama supplier baru.
+- MSK dan saldo batch bertambah.
+- Dibuat purchase header/detail, batch, stock movement, laporan dan audit.
+- Proses tidak boleh berlangsung ketika opname aktif.
+- Histori stok masuk tidak dapat diedit. TransactionService.UpdatePurchase
+  secara eksplisit selalu menolak perubahan; pembetulan melalui koreksi atau
+  transaksi baru menjaga jejak lama.
+- Kode UI masih memiliki kerangka editor stok masuk, namun alur edit produksi
+  tidak tersedia dan service menolaknya.
+
+------------------------------------------------------------
+9. PENJUALAN KASIR
+------------------------------------------------------------
+SalePanel menyediakan pencarian obat, informasi harga/satuan/stok total dan
+stok yang layak jual, jumlah, keranjang, catatan, total dan checkout.
+Shortcut:
+F1 fokus pencarian; F2 fokus qty; F5 checkout; Esc menawarkan pengosongan
+keranjang.
+
+Alur:
+1. Cari obat dan tambahkan jumlah ke keranjang.
+2. UI memeriksa jumlah yang diminta terhadap stok layak jual.
+3. Checkout memilih Tunai/QRIS, memasukkan diskon, dan untuk Tunai menerima
+   nilai uang dibayar serta menghitung kembalian.
+4. Sistem menolak keranjang kosong, kuantitas <=0, stok kurang, pembayaran
+   selain Tunai/QRIS, diskon negatif atau diskon melebihi subtotal.
+5. Ketika transaksi disimpan, service memeriksa ulang stok dalam transaksi
+   SQLite; flag _saving dan tombol nonaktif mencegah double submit UI.
+6. Sale, detail item, perubahan stok, pemetaan batch, ledger mutasi dan audit
+   tersimpan dalam satu transaksi.
+7. User mendapat kode, total dan (Tunai) uang bayar/kembalian; dapat memilih
+   mencetak struk.
+
+FEFO dan expired:
+- Batch dengan expiry terdekat dikonsumsi lebih dulu.
+- Batch expired ditolak untuk penjualan.
+- Batch tanpa expiry dianggap tidak expired.
+- Jika stok agregat lama belum mempunyai mapping batch, bagian stok legacy
+  masih dapat dijual tanpa mapping batch.
+- Penjualan mengurangi KLR, qty batch dan menulis stock movement KELUAR.
+- Penjualan yang mengambil satu batch menyimpan batch utama juga di sale_items;
+  bila lebih dari satu batch, rincian disimpan di sale_item_batches.
+
+Pembayaran dan kode laporan:
+- Metode utama hanya TUNAI dan QRIS.
+- Tanggal laporan dihitung dari waktu komputer lokal:
+  waktu < 15:00 -> tanggal kalender yang sama.
+  waktu >= 15:00 -> tanggal kalender + 1 hari.
+- transaction_time tetap disimpan terpisah dari report_date.
+- Setiap report_date dan metode mempunyai urutan sendiri, T1, T2... untuk
+  Tunai dan Q1, Q2... untuk QRIS. Unique index mencegah kode ganda jika dapat
+  dibuat saat tidak ada duplikasi lama.
+- Pergantian periode tidak menghapus histori dan nomor dimulai kembali
+  berdasarkan tanggal laporan yang baru.
+- Perubahan jam Windows dapat mengubah klasifikasi jika jam lokal salah.
+
+Diskon adalah nominal Rupiah sebelum final, disimpan dalam sales serta audit;
+total akhir = subtotal - diskon. Tidak ada promosi kupon atau aturan diskon
+bertingkat yang terlihat.
+
+------------------------------------------------------------
+10. STRUK DAN PEMBATALAN PENJUALAN
+------------------------------------------------------------
+Struk dibentuk dari database dan mencakup nama FIRDAN FARMA, kode laporan,
+nomor internal, waktu, tanggal laporan, nama tampilan kasir, metode bayar,
+nama obat, qty, harga, subtotal item, batch jika tercatat, subtotal, diskon,
+total dan ucapan terima kasih. Nilai uang diformat Rupiah Indonesia.
+
+Kode menggunakan PrintDocument dan PrintDialog Windows; tidak ada PrintPreview
+khusus pada ReceiptService. Printer default/driver/ukuran kertas dan hasil
+harus diuji di mesin klien, terutama Windows 7.
+
+Pembatalan:
+- Hanya Super Admin.
+- Hanya status FINAL.
+- Alasan wajib.
+- Transaksi tidak dihapus; status diubah menjadi DIBATALKAN dan catatan
+  pembatalan ditambahkan.
+- KLR dibalik, saldo batch asal dikembalikan berdasarkan sale_item_batches,
+  movement BATAL_PENJUALAN dan audit ditulis.
+- Untuk porsi stok legacy tanpa mapping, dibuat batch retur RETUR-... tanpa
+  tanggal expiry.
+- Pembatalan ditolak saat opname aktif.
+
+------------------------------------------------------------
+11. KOREKSI STOK DAN STOK OPNAME
+------------------------------------------------------------
+11.1 Koreksi stok manual
+Delta dapat positif/negatif dan alasan wajib. Koreksi positif menaikkan MSK,
+membuat batch sintetis ADJ-<timestamp> tanpa expiry, lalu movement dan audit.
+Koreksi negatif menaikkan KLR, mengurangi batch dengan urutan expiry/FEFO,
+kemudian stok legacy bila diperlukan. Stok negatif ditolak. Koreksi dibatasi
+permission atau Super Admin dan diblokir saat opname aktif.
+
+Koreksi positif tidak meminta batch dan expiry aktual pada panel koreksi. Oleh
+karena itu stok yang ditambahkan dengan cara ini mendapat batch tanpa expiry dan
+dapat menjadi layak jual. Jika barang koreksi mewakili produk fisik tertentu,
+operator harus mempertimbangkan apakah koreksi yang tepat perlu lewat stok
+masuk dengan batch/expiry.
+
+11.2 Koreksi batch/expiry
+Hanya Super Admin, memerlukan nomor batch baru yang tidak kosong dan alasan.
+Expiry dapat dihapus atau diubah. Setiap koreksi dicatat sebagai
+KOREKSI_BATCH; perubahan tanggal juga menghasilkan UBAH_EXPIRED_DATE.
+
+11.3 Stok opname yang dirancang
+Membuat snapshot semua obat aktif, batch, expiry, serta stok legacy tanpa
+batch. Tiap item menyimpan stok sistem, fisik, selisih, nilai berdasarkan harga
+beli, alasan, penghitung dan waktu hitung. Item yang belum dihitung menahan
+posting; stok fisik tidak boleh negatif; item selisih harus punya alasan saat
+posting. Posting menghasilkan mutasi stok opname dan audit. Draft dapat
+dibatalkan dengan alasan; sesi final/batal tidak dapat diedit.
+
+11.4 Perilaku aktual stok opname
+- Service mengizinkan satu sesi aktif DRAFT atau MENUNGGU_PEMERIKSAAN.
+- Semua operasi utama (mulai, hitung, selesai, batal, daftar) mewajibkan
+  Super Admin; karyawan tidak memiliki akses UI.
+- Start membuat DRAFT dan snapshot.
+- SaveCount hanya menerima DRAFT; reason dapat kosong sewaktu menyimpan dan
+  wajib baru bila benar-benar ada selisih saat posting.
+- Complete menerima DRAFT atau MENUNGGU_PEMERIKSAAN dan mem-post langsung.
+- Tidak ditemukan method/UI submit yang mengubah DRAFT ke
+  MENUNGGU_PEMERIKSAAN. Maka pemisahan penghitung dengan pemeriksa yang
+  dijanjikan sebagian dokumen belum terwujud; Super Admin dapat membuat,
+  menghitung, dan mem-post sendiri.
+- Ketika sesi aktif, penjualan, stok masuk, koreksi, perubahan master tertentu,
+  pembatalan dan restore diblokir agar snapshot tidak berubah.
+- Saat posting, sistem menghitung ulang stok saat ini, menolak item belum
+  dihitung, validasi stok batch, mencegah posting ganda dan memperbarui batch,
+  medicine summary, stock movement, status dan audit secara atomik.
+- Hasil opname bisa diexport Excel.
+
+------------------------------------------------------------
+12. DASHBOARD DAN LAPORAN
+------------------------------------------------------------
+12.1 Dashboard karyawan
+Memuat penjualan periode laporan aktif, jumlah transaksi, nilai Tunai/QRIS,
+jumlah obat aktif, total stok, obat menipis serta aktivitas milik sendiri.
+Ringkasan modul disusun sesuai izin yang dimiliki.
+
+12.2 Dashboard Super Admin
+Mendapat informasi lebih luas: pembelian periode, stok masuk/keluar, risiko,
+diskon, aktivitas, pembatalan, koreksi, serta grand sales, grand purchases,
+nilai stok dan perkiraan laba. Nilai laba adalah perhitungan sederhana dari
+(unit_price - unit_cost) x qty dikurangi diskon untuk transaksi FINAL; bukan
+laba akuntansi bersih yang memperhitungkan biaya usaha, pajak, retur atau
+penyesuaian akuntansi lain.
+Dashboard menghitung expiry sampai kira-kira 90 hari; laporan Expired
+memakai 180 hari.
+
+12.3 Tab laporan aktual
+- Stok: ringkasan obat aktif, AWL/MSK/KLR/SISA, harga, stok minimal, kondisi.
+- Tunai: transaksi Tunai.
+- QRIS: transaksi QRIS.
+- Gabungan: rekap metode, bruto, diskon, bersih, dibatalkan.
+- Stok Masuk: bagi user dengan izin stok masuk; supplier ditampilkan untuk
+  Super Admin dan dapat disembunyikan untuk Karyawan.
+- Expired: batch dengan stok >0 sampai horizon 180 hari.
+- Batch, Koreksi, Diskon, Audit: tab Super Admin.
+
+Laporan penjualan memuat kode, waktu, detail barang, subtotal, diskon, total,
+status, user, catatan dan estimasi laba per transaksi. Ada filter tanggal dan
+diskon pada UI, ringkasan berdasarkan Tunai/QRIS, export Excel, cetak struk,
+dan pembatalan pilihan Super Admin dari tab Gabungan. Service mendukung filter
+lain seperti user/segmen waktu pada beberapa query, tetapi tidak semuanya
+tersedia sebagai kontrol di antarmuka.
+
+Kartu stok menampilkan tanggal/jam, kode, jenis mutasi, sumber, batch/expiry,
+qty masuk/keluar, saldo total dan batch sebelum/sesudah, metode pembayaran,
+user, referensi, alasan dan catatan. Filter yang tampil: obat, tanggal, batch,
+jenis, kode dan (Super Admin) user. Bisa diexport.
+
+Activity mengelompokkan audit yang memiliki transaction_code agar beberapa
+action dalam satu transaksi dapat tampil sebagai satu ringkasan. Karyawan
+hanya mengambil audit dengan user_id dirinya; Super Admin bisa semua user dan
+filter user. Login gagal dapat difilter. Tab Audit Admin menyediakan data
+before/after lebih rinci. Export Excel merupakan salinan yang dapat diedit,
+bukan arsip immutable.
+
+------------------------------------------------------------
+13. DATABASE DAN MODEL DATA
+------------------------------------------------------------
+Database.CurrentSchemaVersion pada kode adalah 9. Beberapa dokumen lama
+menyatakan v8; kode aktual yang menjadi acuan versi saat ini adalah v9.
+SQLite connection mengaktifkan foreign keys, journal mode WAL, synchronous
+NORMAL, dan busy_timeout 5000 ms.
+
+Tabel utama dan fungsi:
+- schema_info: versi schema.
+- app_settings: pasangan pengaturan key/value.
+- users: username, display name, role, hash, status, izin, waktu.
+- categories: kategori obat dan status.
+- suppliers: nama, kontak, alamat, status.
+- medicines: identitas obat, harga, kategori/supplier, stok AWL/MSK/KLR,
+  stok minimum dan status.
+- medicine_lots: struktur lot lama/legacy.
+- medicine_batches: saldo fisik saat ini per batch dan expiry.
+- sales: transaksi, waktu, report_date/code, pembayaran, nilai, status dan user.
+- sale_items: item penjualan, qty, harga jual, harga pokok, subtotal.
+- sale_item_batches: alokasi qty per batch untuk setiap item.
+- purchases: header stok masuk, supplier, faktur, tanggal, nilai, user dan tipe.
+- purchase_items: rincian obat/harga/diskon/PPN/batch/expiry.
+- stock_mutations: ledger stok versi lama.
+- stock_movements: ledger mutasi stok yang digunakan saat ini.
+- audit_logs: jejak tindakan dan konteks audit.
+- stock_opnames: header sesi opname/status/petugas/waktu.
+- stock_opname_items: snapshot dan hasil hitung per obat/batch.
+
+Inisialisasi membuat tabel/indeks/constraint, memeriksa kolom migrasi, memetakan
+medicine_lots lama ke batches dan stock_mutations lama ke stock_movements,
+memperbarui tanggal laporan lama dengan cut-off, menyimpan grand_total lama,
+memastikan akun standar dan memasang seed bila aturan seed terpenuhi. Backup
+pre-migration dibuat jika file database sudah ada dan versinya lebih rendah
+dari v9.
+
+Ledger operasional stock_movements dan audit_logs bukan hal yang sama:
+stock_movements mencatat kuantitas/saldo; audit_logs mencatat pelaku, role,
+aksi, alasan, referensi dan nilai relevan. Keduanya saling melengkapi saat
+investigasi.
+
+------------------------------------------------------------
+14. AUDIT, KEAMANAN DAN BATAS KEPERCAYAAN
+------------------------------------------------------------
+AuditService.LogDetailed adalah penulis audit terpusat. Field dapat meliputi
+user id/nama/role, action, entity/id, timestamp lokal, alasan, nominal, diskon,
+pembayaran, transaction code, obat, batch, qty masuk/keluar, nilai lama/baru,
+status dan catatan. Untuk banyak operasi, audit ditulis dalam transaksi SQLite
+yang sama dengan perubahan bisnis; rollback transaksi bisnis juga membatalkan
+baris audit pendamping.
+
+Action audit yang ditemukan:
+- LOGIN, LOGOUT.
+- TAMBAH_AKUN, UBAH_AKUN.
+- TAMBAH_OBAT, UBAH_OBAT, AKTIFKAN_OBAT, NONAKTIFKAN_OBAT.
+- KOREKSI_BATCH, UBAH_EXPIRED_DATE.
+- TAMBAH_OBAT_DARI_STOK_MASUK, UPDATE_OBAT_DARI_STOK_MASUK.
+- TAMBAH_KATEGORI, UBAH_KATEGORI, TAMBAH_SUPPLIER, UBAH_SUPPLIER.
+- PENJUALAN, PEMBERIAN_DISKON, STOK_KELUAR, STOK_MASUK,
+  PENYESUAIAN_STOK, PEMBATALAN_TRANSAKSI.
+- MULAI_STOK_OPNAME, HITUNG_STOK_OPNAME, SELESAI_STOK_OPNAME_ITEM,
+  SELESAI_STOK_OPNAME, BATAL_STOK_OPNAME.
+- BACKUP_DATABASE, RESTORE_DATABASE, IMPORT_EXCEL.
+Satu operasi dapat membuat beberapa baris audit, misalnya penjualan + diskon +
+mutasi keluar per obat/batch.
+
+Batas keamanan yang perlu dipahami:
+- Audit dan data berada pada file SQLite yang sama, lokal.
+- Belum ada hash chain, digital signature, WORM, atau audit terpisah.
+- Pemilik akses tulis file database/OS dapat mengubah database di luar aplikasi
+  tanpa menghasilkan audit baru.
+- Tidak ada audit pusat atau mekanisme anti-tamper.
+- Tidak semua exception validasi bisnis dicatat sebagai status GAGAL; login
+  gagal tercatat, tetapi kegagalan validasi lain tidak selalu tercatat.
+- Waktu audit memakai DateTime.Now di komputer; jam yang salah memengaruhi
+  urutan/klasifikasi waktu.
+- Tidak ada MFA atau rate limit login.
+- Backup default berada di profil lokal yang sama, bukan otomatis off-device.
+- Restore mengganti isi database aktif dengan isi backup. Audit yang ada di
+  database lama tidak otomatis bertahan pada database hasil restore.
+- Excel dapat dimodifikasi dan bukan bukti audit immutable.
+
+------------------------------------------------------------
+15. BACKUP, RESTORE, EXPORT DAN IMPORT
+------------------------------------------------------------
+Backup database menggunakan API SQLite BackupDatabase dan membuat file
+firdan_farma_yyyyMMdd_HHmmss_fff.db di folder backup. Backup manual oleh user
+tercatat audit. Restore hanya Super Admin, menolak ketika opname aktif,
+memeriksa file sumber, membuat safety backup, mengganti database, menjalankan
+inisialisasi/migrasi ulang dan mencatat restore. Jika restore gagal, service
+berupaya memulihkan safety backup.
+
+Export Excel:
+- DataTable diekspor menjadi worksheet .xlsx melalui ClosedXML.
+- Nama worksheet dibatasi maksimal 31 karakter.
+- Export tabel obat, laporan, kartu stok, aktivitas dan hasil opname disediakan
+  sesuai UI/modul.
+- Pemisah tanggal internal pada tabel laporan disaring dari export sebagai
+  baris pemisah tanpa mengubah sumber database.
+
+Import obat Excel:
+- Ada di ExcelBackupService.ImportMedicines, hanya Super Admin.
+- Membuat backup lebih dulu.
+- Membaca worksheet pertama dan mencari header dalam 10 baris awal, antara
+  lain Nama Barang, AWL, MSK, KLR.
+- Menghitung berhasil/dilewati/gagal dan melewatkan baris ringkasan tertentu.
+- Memanggil MedicineService.Save untuk record.
+- Tidak ada alur tombol import pada UI produksi yang ditemukan; kemampuan ini
+  tersedia di service, bukan workflow pengguna utama.
+
+------------------------------------------------------------
+16. ARSITEKTUR KODE DAN FILE
+------------------------------------------------------------
+Entry/config/build:
+- Program.cs: startup, inisialisasi dan siklus login.
+- App.config: aktivasi kebijakan runtime legacy serta target .NET v4.8.
+- ApotekFirdanFarma.csproj: WindowsDesktop WinExe, target net48, C# 7.3,
+  dependency, platform, resource CSV.
+
+Core:
+- Core/AppPaths.cs: direktori database dan backup lokal.
+- Core/AppClock.cs: jam startup/live dan deteksi lompatan jam.
+
+Data/Model/Security:
+- Data/Database.cs: schema, koneksi, indeks, migrasi, akun awal, seed, guard
+  opname dan query.
+- Data/initial_medicines.csv: data 679 produk yang di-embed.
+- Models/AppUser.cs: role dan permission efektif.
+- Security/PasswordHasher.cs: PBKDF2-SHA256.
+
+Services:
+- AuthService: login/logout.
+- AuditService: penulisan log.
+- ExcelBackupService: backup/restore, export dan import.
+- MasterService: kategori/supplier.
+- MedicineService: obat, stok, batch, harga, koreksi, mutation.
+- ReceiptService: format/cetak struk.
+- ReportService: dashboard, penjualan, stok, kartu stok, expiry, audit/activity.
+- StockOpnameService: snapshot, hitung, posting dan pembatalan opname.
+- TransactionService: penjualan, stok masuk, pembatalan, validasi FEFO/cutoff.
+- UserService: akun dan guard Super Admin.
+
+UI:
+- LoginForm.cs: login.
+- MainForm.cs: sidebar, header, navigasi, sesi.
+- DashboardPanel.cs: ringkasan per role.
+- MedicinePanel.cs: daftar obat, batch, edit, stok masuk.
+- SalePanel.cs: kasir dan checkout.
+- PurchasePanel.cs: stok tunggal/faktur.
+- StockPanels.cs: koreksi, kartu stok dan opname.
+- ReportsPanel.cs: tab laporan, aktivitas dan tindakan transaksi.
+- AdminPanels.cs: user, kategori, supplier, backup/restore.
+- UiHelpers.cs: kontrol, grid, Rupiah, dialog.
+
+Dokumen dan tooling:
+- README.md: ringkasan, build, kredensial development, target release.
+- PRD.md: kebutuhan, aturan bisnis dan acceptance.
+- PANDUAN_PENGGUNAAN.md: petunjuk operasional.
+- CHANGELOG_v5.md: ringkasan perubahan v5.
+- MANUAL_TESTS.md: checklist manual acceptance.
+- Deskripsi_Aplikasi_Apotek_Firdan_Farma.txt: gambaran modul/aturan/status.
+- FirdanFarma_Blueprint_Lengkap.txt: blueprint dan risiko.
+- Rangkuman_Deskripsi_Aplikasi_Firdan_Farma_Audit_RBAC.txt: pemetaan RBAC/
+  audit dan konsep aplikasi.
+- RBAC_AUDIT_TRAIL_LENGKAP.txt: detail implementasi audit/RBAC dan bahan
+  riset/skripsi (judul, masalah, tujuan, teori, metodologi, indikator, formula,
+  struktur bab, validitas dan etika). Materi penelitian di dalamnya adalah
+  usulan, bukan fitur aplikasi atau hasil penelitian terukur.
+- data_stok_obat_untuk_launching.md: sumber/penjelasan serta seluruh daftar
+  produk seed.
+- tools/generate_initial_medicines.py: pembentuk CSV dari tabel markdown.
+- tools/build_user_manual.py: menghasilkan halaman PNG dan PDF panduan umum.
+- tools/build_release_manuals.py: membentuk PDF karyawan/admin dari screenshot.
+- build-win11.ps1: restore dan build Release.
+- package-win7.ps1: build lalu membuat folder portabel.
+- run-debug.ps1: build Debug dan meluncurkan EXE.
+- Sync_Data_Dan_Build.bat: menutup proses, menghapus DB lokal, build/package,
+  lalu meluncurkan paket dengan data launching.
+- Pasang_Ke_Desktop.bat: membuat shortcut ke EXE di folder paket.
+- .vscode/tasks.json dan launch.json: task build dan debugger VS Code.
+- .gitignore: mengecualikan artefak build, database, dist dan file IDE.
+
+Artefak dist yang terlihat mencakup paket FirdanFarma-Win7-v5, EXE/config/PDB,
+DLL dependency, folder native x86/x64, tiga PDF manual, asset screenshot/manual,
+dan beberapa tangkapan layar uji. File gambar/PDF adalah artefak dokumentasi/
+visual; keberadaannya sendiri bukan bukti acceptance test berhasil.
+
+------------------------------------------------------------
+17. BUILD DAN OPERASI RILIS
+------------------------------------------------------------
+Perintah/documentasi build:
+- Debug: dotnet build -c Debug -p:Platform=AnyCPU atau run-debug.ps1.
+- Release: build-win11.ps1 menjalankan restore dan build Release.
+- Paket: package-win7.ps1 menyalin seluruh isi bin/Release/net48 beserta README,
+  MANUAL_TESTS, PDF manual jika tersedia, dan shortcut ke
+  dist/FirdanFarma-Win7-v5.
+- Paket harus dikirim sebagai folder utuh, bukan EXE tunggal.
+- Client membutuhkan Windows 7 SP1, .NET Framework 4.8 Runtime dan driver
+  printer yang berfungsi. Dukungan Windows 7 wajib dibuktikan dengan uji
+  langsung.
+
+PERINGATAN KRITIS - JANGAN JALANKAN DI DATA PRODUKSI TANPA BACKUP:
+A. Database.Initialize mengandung pembersihan seed khusus launching. Jika tabel
+   medicines sudah berisi data tetapi jumlah obat dengan (awl+msk-klr)>0
+   kurang dari 400, kode menghapus data penjualan, item, pembelian, opname,
+   movement, mutasi, batch, lot dan medicines, kemudian memasang seed launching.
+   Syarat ini dapat mengenai database kecil yang nyata, tidak hanya data dummy.
+   Penghapusan dapat terjadi saat aplikasi membuka database melalui inisialisasi;
+   backup pre-migration hanya otomatis dibuat bila versi schema lama, bukan
+   untuk setiap pembersihan seed database v9.
+B. Sync_Data_Dan_Build.bat secara eksplisit taskkill proses aplikasi dan
+   menghapus %LOCALAPPDATA%\FirdanFarma\firdan_farma.db serta file samping
+   sebelum build. Ini merusak database lokal yang ada dan hanya layak untuk
+   lingkungan simulasi/launching yang memang boleh direset.
+C. package-win7.ps1 menghapus folder output dist/FirdanFarma-Win7-v5 sebelum
+   menyalin paket baru. Jangan simpan data manual penting hanya di folder output
+   itu tanpa salinan lain.
+D. Ganti password development sebelum memberikan komputer kepada operator.
+E. Simpan backup secara terjadwal pada media/lokasi berbeda dan lakukan uji
+   restore, karena backup di profil lokal yang sama ikut berisiko bila disk
+   hilang/rusak.
+
+------------------------------------------------------------
+18. MASALAH, RISIKO DAN KETIDAKSESUAIAN YANG TERLIHAT
+------------------------------------------------------------
+Temuan berikut dibedakan dari kebutuhan produk dan sebaiknya ditangani sebelum
+go-live:
+
+1. Pembersihan database otomatis pada seed (risiko tertinggi).
+   Kriteria kurang dari 400 obat dengan stok positif bisa mengenai stok nyata
+   apotek kecil. Ada penghapusan tabel transaksi dan stok tanpa konfirmasi.
+   Seed/launching perlu dipisahkan dari migrasi produksi dan harus tidak pernah
+   menghapus histori operasional.
+
+2. Skrip sinkronisasi menghapus file database.
+   Sync_Data_Dan_Build.bat adalah perintah destruktif untuk database aktif.
+   Label peringatan dan perlindungan environment diperlukan; jangan dipakai
+   untuk sinkronisasi produksi.
+
+3. Nama obat belum identitas unik yang aman.
+   Dua nama kembar beda satuan disebut dalam data awal. Pencocokan invoice
+   berdasarkan normalisasi nama saja dapat memilih record yang keliru.
+   Gunakan kode unik atau kombinasi nama+satuan/kemasan dan validasi konflik.
+
+4. Data seed tidak mempunyai expiry aktual.
+   Batch awal dibuat STOK-AWAL dengan expired kosong sehingga diperlakukan
+   layak jual dan tidak muncul pada daftar expiry. Catat/cek expiry fisik
+   sebelum mengandalkan kontrol FEFO/expired untuk stok launching.
+
+5. Produk Fiesta konsinyasi dan data kosong.
+   15 baris Fiesta dalam sumber disebut tidak memiliki satuan dan harga beli
+   nol. Data ini memerlukan konfirmasi/pengisian dan aturan margin konsinyasi;
+   nol bukan selalu harga beli produk biasa.
+
+6. Status schema di dokumen lama tertinggal.
+   Blueprint dan README menyebut migrasi sampai v8; Database.cs mendefinisikan
+   CurrentSchemaVersion=9. RBAC_AUDIT_TRAIL_LENGKAP menyebut v9. Perbarui
+   dokumen agar versi tidak membingungkan.
+
+7. Klaim export saat penutupan tidak terlaksana.
+   Panduan/blueprint menyatakan prompt export pada close; MainForm saat ini
+   hanya mencatat logout. Export tersedia manual di laporan.
+
+8. Stok opname tidak punya approval workflow terpisah.
+   UI/service seluruhnya membatasi opname ke Super Admin; tidak ada submit
+   DRAFT ke MENUNGGU_PEMERIKSAAN. Super Admin yang sama dapat menghitung dan
+   posting. Jika pemisahan tugas diwajibkan, perlu status/transisi dan role
+   penghitung/pemeriksa yang sesungguhnya.
+
+9. Penyuntingan stok masuk tidak tersedia.
+   Service selalu menolak UpdatePurchase. Kerangka editor masih tersisa,
+   sementara panduan menyebut koreksi/pembetulan. Dokumentasikan tindakan
+   pembetulan yang benar dan jangan menganggap faktur lama bisa diedit.
+
+10. Penambahan obat tidak punya tombol khusus pada daftar.
+    Form edit master hanya tersedia untuk data terpilih; pembuatan baru praktis
+    melalui stok masuk. Ini berbeda dari dokumen yang menyebut tambah obat
+    langsung.
+
+11. Import Excel bukan fitur antarmuka.
+    Service impor tersedia, tetapi tombol/alur produk untuk menjalankannya
+    tidak ditemukan. Jangan menjanjikannya sebagai workflow standar.
+
+12. Koreksi positif membuat batch ADJ tanpa expiry.
+    Stok tambahan dari koreksi tidak mencatat batch/expiry aktual dan dianggap
+    dapat dijual. Tentukan prosedur agar koreksi fisik tidak melewati pencatatan
+    batch yang dibutuhkan apotek.
+
+13. Audit SQLite lokal tidak tahan manipulasi.
+    Audit berguna untuk accountability operasional dalam aplikasi, namun bukan
+    audit immutable/forensik dan dapat diubah oleh pemilik akses database.
+    Tidak ada server log terpisah.
+
+14. Waktu bergantung komputer.
+    Tanggal transaksi, cut-off, expiry dan timestamp audit bergantung jam OS.
+    Jam salah dapat menggeser laporan; deteksi perubahan hanya memunculkan
+    peringatan dan tidak memverifikasi sumber waktu tepercaya.
+
+15. Backup/restore perlu prosedur.
+    Backup default satu lokasi lokal; Excel bukan backup penuh. Restore
+    menggantikan database aktif dan dapat mengganti histori aktif. Perlu
+    backup luar perangkat, checksum, kontrol izin OS dan tes restore.
+
+16. Windows 7/printer belum terbukti.
+    Dokumen mensyaratkan tes pada perangkat/VM Windows 7 SP1 + .NET 4.8 dan
+    printer client. Keberhasilan build Windows modern saja belum cukup.
+
+17. Tidak ada bukti suite uji otomatis dalam proyek.
+    Repository berisi checklist MANUAL_TESTS.md, bukan project test otomatis.
+    Kotak checklist masih merupakan skenario yang harus dijalankan; jangan
+    melaporkannya sebagai PASS hanya karena source tersedia.
+
+18. Angka laba dashboard adalah estimasi sederhana.
+    Jangan perlakukan grand profit sebagai laporan akuntansi resmi atau margin
+    konsinyasi/pajak lengkap.
+
+19. Kesiapan audit gagal operasi terbatas.
+    Login gagal dicatat; banyak validasi bisnis yang melempar exception tidak
+    membuat audit gagal. Bila kebutuhan investigasi memerlukan seluruh
+    percobaan/penolakan, logging harus diperluas dengan hati-hati.
+
+20. SQLite adalah satu komputer, bukan multi terminal.
+    WAL dan busy timeout membantu database lokal; tidak menciptakan sinkronisasi
+    antar mesin atau arsitektur cabang.
+
+------------------------------------------------------------
+19. DOKUMENTASI DAN PERBEDAAN VERSI
+------------------------------------------------------------
+Dokumen repository memiliki fokus berlainan:
+- README: overview, fitur ringkas, setup, akun, lokasi DB dan status release.
+- PRD: kebutuhan utama, aturan 15:00, role, acceptance dan batas scope.
+- Panduan: langkah kerja user dan pemecahan masalah.
+- Changelog v5: perubahan batch/FEFO/QRIS/audit dan tooling.
+- Manual tests: checklist login, cutoff, stok, opname, diskon, pembatalan,
+  laporan, backup, struk dan Windows 7.
+- Deskripsi lengkap: tujuan/modul, data, operasi dan kesiapan.
+- Blueprint: ringkasan struktur/risiko/arah pengembangan.
+- Dokumen rangkuman RBAC: permission dan katalog audit.
+- Dokumen RBAC lengkap: fakta implementasi, batas keamanan, serta usulan
+  akademik untuk penelitian skripsi.
+- Data stok launching: sumber dan catatan atas seluruh data produk.
+
+Perbedaan yang paling jelas:
+- Schema v8 di dokumen lama vs v9 di Database.cs dan dokumen RBAC baru.
+- Penutupan aplikasi diklaim menanyakan export, tetapi MainForm tidak.
+- Stok opname digambarkan memiliki pengajuan/pemeriksa terpisah, tetapi kode
+  saat ini tidak menyediakan transisi submit tersebut.
+- Beberapa screenshot/manual menampilkan menu Pembelian terpisah, sedangkan
+  MainForm aktual membuka Stok Masuk dari halaman Obat.
+- Ada dokumen yang menyebut tambah obat langsung; MedicinePanel tidak memiliki
+  tombol tambah, walau stok masuk dapat membuat master obat.
+- Dokumen lama menyebut 679 baris termasuk header; jumlah terverifikasi ialah
+  679 produk, yaitu 680 baris CSV termasuk header.
+
+Jika dokumentasi dan perilaku berselisih, source code yang dibaca dalam analisis
+ini dipakai untuk menjelaskan implementasi aktual, sementara PRD tetap menjadi
+sumber kebutuhan yang harus diselaraskan.
+
+------------------------------------------------------------
+20. CHECKLIST PRA-GO-LIVE YANG BERMAKNA
+------------------------------------------------------------
+1. Pindahkan seed/reset launching ke mekanisme eksplisit non-produksi; pastikan
+   startup tidak dapat menghapus database kerja.
+2. Uji di database salinan; verifikasi migration dan restore tanpa kehilangan
+   transaksi.
+3. Pastikan setiap produk memiliki identitas yang tidak ambigu (kode dan
+   satuan/kemasan), harga yang dikonfirmasi, supplier bila diperlukan, batch
+   serta expiry fisik.
+4. Ganti kedua password awal; buat akun per petugas; atur izin stok masuk dan
+   koreksi sekecil yang diperlukan.
+5. Pastikan tanggal/jam komputer benar; uji transaksi tepat sebelum dan pada
+   15:00 serta kode T/Q.
+6. Uji stok masuk tunggal, faktur multiitem, PPN/diskon, invoice duplikat,
+   batch dan expiry.
+7. Uji FEFO lintas batch, batch expired, legacy stock tanpa batch, stok negatif,
+   koreksi, pembatalan dan hasil kartu stok.
+8. Putuskan apakah opname memerlukan pemisahan penghitung/pemeriksa dan
+   tambahkan enforcement bila dibutuhkan.
+9. Uji backup ke lokasi berbeda, restore, safety backup, dan verifikasi isi
+   pascarestore. Jangan lakukan pada DB satu-satunya.
+10. Jalankan seluruh MANUAL_TESTS.md di Windows 7 SP1 + .NET 4.8 dan pada
+    printer/driver yang akan digunakan.
+11. Pastikan Excel yang diekspor dapat dibuka dan angka sudah direkonsiliasi.
+12. Latih operator untuk tidak menjalankan Sync_Data_Dan_Build.bat pada mesin
+    produksi dan tidak menggunakan Excel sebagai sumber database.
+13. Selesaikan penyelarasan README/PRD/panduan/manual dengan UI final.
+
+------------------------------------------------------------
+21. KESIMPULAN MENYELURUH
+------------------------------------------------------------
+Firdan Farma adalah aplikasi desktop apotek offline yang menggabungkan kasir,
+master obat, persediaan per batch, pencatatan supplier/stok masuk, laporan,
+kontrol akun, audit dan pemulihan database dalam satu program Windows Forms.
+Hubungan dengan pekerjaan apotek adalah pencatatan barang datang, penyimpanan
+jumlah/expiry, pelayanan transaksi penjualan, pengurangan stok, pembagian hasil
+Tunai/QRIS, serta pemeriksaan pergerakan dan aktivitas petugas.
+
+Kekuatan implementasi yang nyata:
+- pemisahan Super Admin/Karyawan dengan izin operasional tambahan;
+- hash password PBKDF2, database lokal dengan foreign key/WAL;
+- transaksi penjualan/stok atomik, stok tidak negatif dan kode laporan T/Q;
+- cut-off khusus pukul 15.00 tanpa reset histori;
+- FEFO dan ledger stock movement per batch;
+- pembatalan, koreksi, opname, audit before/after serta alasan;
+- laporan dan export Excel;
+- backup/restore serta migrasi schema.
+
+Kesimpulan kesiapan:
+Repository menunjukkan inti fungsi operasional yang cukup luas untuk diuji,
+bukan bukti bahwa aplikasi sudah aman dipakai produksi tanpa syarat. Risiko
+seed yang dapat menghapus data, skrip yang menghapus database, identitas nama
+obat vs kemasan, expiry seed kosong, keterbatasan audit lokal, kesenjangan
+workflow opname, dokumentasi yang tertinggal, dan acceptance Windows/printer
+harus diselesaikan atau dikendalikan secara eksplisit sebelum go-live.
+
+SELESAI

@@ -1,0 +1,375 @@
+BLUEPRINT APLIKASI FIRDAN FARMA
+
+Disusun dari isi repository: kode sumber, dokumen PRD, panduan penggunaan, panduan simulasi, manual test, seed data, dan script build.
+Tujuan dokumen ini: jadi peta besar aplikasi, isi fitur, aturan bisnis, struktur data, dan kekurangan yang masih perlu dikembangkan.
+
+1. IDENTITAS APLIKASI
+- Nama: Firdan Farma Desktop
+- Bentuk: aplikasi desktop Windows
+- Mode kerja: offline
+- Bahasa utama: C# WinForms
+- Runtime: .NET Framework 4.8
+- Database: SQLite lokal
+- Target kompatibilitas: Windows 7 SP1
+- Paket tambahan: ClosedXML untuk Excel, System.Drawing.Printing untuk struk
+
+2. TUJUAN UTAMA
+- Kasir apotek offline
+- Master obat dan stok akurat
+- Transaksi penjualan Tunai dan QRIS
+- Stok masuk supplier dengan batch dan expired date
+- Laporan operasional dan audit
+- Backup dan restore database
+- Kontrol role Karyawan dan Super Admin
+
+3. STRUKTUR ISI REPO
+- Program.cs
+- App.config
+- ApotekFirdanFarma.csproj
+- Core/AppPaths.cs
+- Data/Database.cs
+- Data/initial_medicines.csv
+- Security/PasswordHasher.cs
+- Models/AppUser.cs
+- Services/AuthService.cs
+- Services/AuditService.cs
+- Services/ExcelBackupService.cs
+- Services/MasterService.cs
+- Services/MedicineService.cs
+- Services/ReceiptService.cs
+- Services/ReportService.cs
+- Services/StockOpnameService.cs
+- Services/TransactionService.cs
+- Services/UserService.cs
+- UI/LoginForm.cs
+- UI/MainForm.cs
+- UI/DashboardPanel.cs
+- UI/MedicinePanel.cs
+- UI/SalePanel.cs
+- UI/PurchasePanel.cs
+- UI/StockPanels.cs
+- UI/ReportsPanel.cs
+- UI/AdminPanels.cs
+- UI/UiHelpers.cs
+- README.md
+- PRD.md
+- PANDUAN_PENGGUNAAN.md
+- MANUAL_TESTS.md
+- CHANGELOG_v5.md
+- Script: run-debug.ps1, build-win11.ps1, package-win7.ps1
+- Script util: tools/build_user_manual.py
+
+4. ALUR APLIKASI
+- Program start di Program.cs
+- Database diinisialisasi otomatis
+- Login muncul dulu
+- Setelah login, MainForm dibuka sesuai user aktif
+- Saat logout atau ganti pengguna, kembali ke login
+- Saat menutup aplikasi, user diminta memilih export laporan periode aktif atau langsung tutup
+
+5. ROLE DAN HAK AKSES
+Karyawan:
+- login
+- penjualan
+- lihat stok
+- lihat kartu stok sesuai akses
+- lihat aktivitas milik sendiri
+- stok masuk hanya jika diberi izin
+- koreksi stok hanya jika diberi izin
+
+Super Admin:
+- semua akses Karyawan
+- kelola user
+- kelola kategori dan supplier
+- aktif/nonaktif obat
+- koreksi batch dan expired
+- pembatalan transaksi
+- backup dan restore
+- lihat audit detail
+- lihat laporan lengkap
+- akses mode simulasi debug
+
+6. FITUR UTAMA PER MODUL
+
+6.1 Login
+- Username dan password lokal
+- Password di-hash PBKDF2-SHA256
+- Login gagal dicatat ke audit
+- Akun nonaktif ditolak
+
+6.2 Beranda / Dashboard
+- Ringkasan penjualan periode aktif
+- Total tunai dan QRIS
+- Total stok aktif
+- Obat stok menipis
+- Aktivitas terbaru
+- Tampilan dashboard beda untuk Super Admin dan Karyawan
+
+6.3 Master Obat
+- Tambah obat
+- Ubah obat
+- Nonaktifkan / aktifkan obat
+- Pencarian by nama, kode, kategori, satuan
+- AWL, MSK, KLR, SISA
+- Harga beli, harga jual, stok minimal
+- Batch dapat dilihat
+- Koreksi batch / expired oleh Super Admin
+- AWL hanya aktif saat buat obat baru
+- Data obat tidak dihapus permanen jika sudah punya histori
+
+6.4 Penjualan
+- Keranjang belanja
+- Cari obat
+- Qty per item
+- Validasi stok
+- Diskon sebelum final
+- Pembayaran Tunai atau QRIS
+- Cetak struk
+- FEFO untuk batch
+- Stok expired tidak boleh dijual
+- Double submit dicegah
+- Transaksi final tersimpan ke database
+- Stok dan kartu stok ikut berubah
+
+Keyboard kecil:
+- F1 fokus pencarian obat
+- F2 fokus qty
+- F5 checkout
+- Esc kosongkan keranjang
+
+6.5 Stok Masuk / Faktur Masuk
+- Dibuka dari tombol Stok Masuk pada tab Obat
+- Saat dibuka menampilkan judul Tambah Obat Masuk
+- Pilihan mode Tunggal atau Batch (Faktur)
+- Mode Tunggal: satu obat, satuan, qty, harga beli, harga jual, batch, dan expired
+- Mode Batch (Faktur): header nama faktur/supplier dan no faktur
+- Detail faktur diisi per baris: nama obat, satuan, qty, harga beli, diskon, PPN, harga jual, batch, expired
+- Obat yang belum ada otomatis dibuat ke master obat saat submit
+- Obat yang sudah ada mendapatkan tambahan stok dan batch
+- No faktur yang sama ditolak agar satu faktur tidak tercatat dua kali
+- Seluruh header dan detail disimpan dalam satu transaksi database
+- Harga jual diisi per obat dan boleh berbeda antarbaris
+- Histori stok masuk yang tersimpan tidak diedit langsung
+
+6.6 Kartu Stok
+- Riwayat mutasi masuk dan keluar
+- Filter tanggal
+- Filter batch
+- Filter jenis mutasi
+- Filter kode transaksi
+- Filter user untuk Super Admin
+- Menampilkan saldo total sebelum/sesudah
+- Menampilkan saldo batch sebelum/sesudah
+
+6.7 Koreksi Stok
+- Delta positif atau negatif
+- Alasan wajib
+- Bisa tambah atau kurangi stok
+- Mutasi batch ikut terarah FEFO
+- Audit dicatat
+- Hanya role yang punya izin atau Super Admin
+
+6.8 Stok Opname
+- Buat sesi opname
+- Snapshot stok aktif, batch, expired, dan legacy stock
+- Isi stok fisik per item
+- Selisih wajib alasan
+- Ajukan pemeriksaan
+- Selesaikan opname
+- Batalkan opname
+- Selisih diposting ke stok dan kartu stok
+- Transaksi stok lain ditahan saat opname aktif
+
+Catatan penting:
+- Di UI sekarang, menu stok opname hanya muncul untuk Super Admin
+- Dokumen PRD/panduan menyebut alur karyawan bisa ikut hitung dan ajukan, tapi menu produksi saat ini tidak menampilkannya
+
+6.9 Laporan
+Tab laporan yang ada:
+- Stok
+- Tunai
+- QRIS
+- Gabungan
+- Stok Masuk
+- Expired
+- Batch
+- Koreksi
+- Diskon
+- Audit
+
+Fitur laporan:
+- filter tanggal
+- export Excel
+- cetak struk dari transaksi terpilih
+- summary per metode pembayaran
+- summary cut-off 15:00
+
+6.10 Aktivitas
+- Log aktivitas user
+- Ringkasan untuk Karyawan
+- Detail penuh untuk Super Admin
+- Filter tanggal, aksi, username
+- Kolom sensitif disembunyikan untuk non-super admin
+
+6.11 User Management
+- Tambah user
+- Ubah user
+- Role: KARYAWAN / SUPER_ADMIN
+- Status aktif/nonaktif
+- Izin stok masuk
+- Izin koreksi stok
+- Minimal harus ada satu Super Admin aktif
+
+6.12 Master Data
+- Kategori obat
+- Supplier
+- Aktif/nonaktif master data
+
+6.13 Backup / Restore
+- Backup database manual
+- Restore database
+- Safety backup sebelum restore
+- Backup otomatis sebelum operasi besar dan migrasi
+- Lokasi default backup di `%LOCALAPPDATA%\FirdanFarma\backup\`
+
+7. SMALL FEATURES YANG ADA DI KODE
+- Sidebar menu berubah sesuai role
+- Header menampilkan periode laporan aktif dan cut-off 15:00
+- Ada label mode simulasi aktif
+- MainForm mendukung ganti pengguna tanpa tutup aplikasi
+- Penjualan menolak stok layak jual yang expired
+- Receipt memakai printer Windows via dialog cetak
+- Dashboard menampilkan kartu ringkas berbasis data live
+- UI memakai helper button/grid/card agar konsisten
+- Grid default read-only, full row select, styling bersih
+- Saat close aplikasi, user bisa export laporan periode aktif ke Excel
+- Saat login gagal, aksi dicatat sebagai audit gagal
+- Saat restore, database lama disalin dulu sebagai safety
+- Saat seed database kosong, data obat awal otomatis diisi dari CSV embedded
+
+8. STRUKTUR DATA / TABEL DATABASE
+Database schema versi 8.
+Tabel utama:
+- schema_info
+- app_settings
+- users
+- categories
+- suppliers
+- medicines
+- medicine_lots
+- medicine_batches
+- sales
+- sale_items
+- sale_item_batches
+- purchases
+- purchase_items
+- stock_mutations
+- stock_movements
+- audit_logs
+- stock_opnames
+- stock_opname_items
+
+Ringkas isi data:
+- users: username, display name, role, password hash, status, izin
+- medicines: kode, nama, kategori, supplier, satuan, AWL/MSK/KLR, harga beli, harga jual, stok minimal
+- medicine_batches: batch number, expired date, qty in/out/available
+- sales: transaction_no, report_date, report_code, payment_method, subtotal, discount, total, status
+- sale_items: obat, qty, unit price, unit cost, subtotal
+- purchases: purchase_no, supplier, faktur supplier, jenis input, waktu, total, status
+- purchase_items: obat, qty, harga faktur, diskon, PPN, batch, expired, harga jual
+- stock_movements: mutasi detail per batch dan referensi
+- audit_logs: aksi, entitas, before/after, nominal, diskon, metode bayar, alasan, status
+- stock_opnames: sesi opname
+- stock_opname_items: item snapshot dan hasil hitung
+
+9. ATURAN BISNIS PENTING
+- Cut-off laporan jam 15:00
+- Transaksi sebelum 15:00 masuk tanggal laporan hari itu
+- Transaksi mulai 15:00 masuk tanggal laporan hari berikutnya
+- Nomor laporan Tunai pakai prefix T
+- Nomor laporan QRIS pakai prefix Q
+- Urutan T dan Q terpisah per tanggal laporan
+- Stok tidak boleh negatif
+- FEFO wajib
+- Batch expired tidak boleh dijual
+- Diskon tidak boleh negatif dan tidak boleh melebihi subtotal
+- Pembatalan transaksi hanya Super Admin
+- Pembatalan harus punya alasan
+- Stok opname memblokir transaksi stok lain
+- Histori tidak dihapus saat koreksi, pembatalan, atau migrasi
+- Restore tidak boleh saat stok opname aktif
+
+10. FORMAT KODE DAN IDENTIFIKASI
+- transaction_no: `PJ-yyyyMMdd-HHmmssfff-userId`
+- purchase_no: `PB-yyyyMMdd-HHmmssfff-userId`
+- opname_no: `SO-yyyyMMdd-HHmmssfff-userId`
+- report_code: `T1`, `T2`, ... atau `Q1`, `Q2`, ...
+
+11. DATA BAWAAN DAN SAMPLE
+- `Data/initial_medicines.csv`
+  - seed master obat bawaan
+  - 679 baris termasuk header
+  - di-embed ke assembly
+  - dipakai sebagai referensi simulasi stok masuk dan FEFO
+
+12. BUKTI / TESTING YANG DISIAPKAN
+- README menjelaskan build, akun awal, lokasi database, dan status fitur
+- PRD menjelaskan scope, rule, dan acceptance
+- PANDUAN_PENGGUNAAN menjelaskan cara pakai modul
+- MANUAL_TESTS berisi checklist acceptance
+
+13. KEKURANGAN / YANG BELUM FINAL
+Paling jelas dari repo:
+- barcode scanner belum ada
+- cloud sync belum ada
+- multi cabang belum ada
+- multi terminal real-time belum ada
+- modul faktur penuh belum final
+- edit stok masuk lama sengaja tidak dibuka agar histori tidak dibalik; pembetulan dilakukan lewat koreksi atau faktur baru
+- import Excel master obat ada di service, tapi tidak terlihat sebagai alur produksi utama
+- stok opname di UI produksi belum memberi akses karyawan seperti yang tertulis di sebagian dokumen
+- kompatibilitas Windows 7 tetap harus dibuktikan langsung di mesin target
+- belum ada bukti integrasi printer selain dialog print Windows
+
+14. RISIKO DAN CELAH DESAIN
+- SQLite lokal cocok untuk single PC, tapi belum kuat untuk multi terminal bersamaan
+- Backup/restore manual masih bergantung prosedur operator
+- Penjualan dan stok masuk masih sangat bergantung pada kedisiplinan input
+- Banyak validasi sudah ada, tapi koreksi operasional tetap butuh audit manusia
+- Dokumen PRD dan implementasi tidak 100 persen selaras di beberapa bagian, terutama stok opname dan modul faktur
+
+15. ARAH PENGEMBANGAN BERIKUTNYA
+- rapikan sinkron antara PRD dan UI nyata
+- pertimbangkan alur pembetulan faktur tanpa mengubah histori asli
+- tambahkan barcode scanner bila hardware kasir mendukung
+- tambah mode review audit yang lebih enak dibaca
+- tambah export/import master yang lebih jelas
+- tambah pelaporan stok minimum dan expired yang lebih tajam
+- tambah pemeriksaan kesiapan printer
+- siapkan strategi bila nanti pindah dari single SQLite ke arsitektur multi terminal
+
+16. RINGKASAN AKHIR
+Firdan Farma saat ini adalah aplikasi apotek offline yang sudah punya inti operasional yang kuat:
+- login dan role
+- master obat
+- penjualan Tunai/QRIS
+- stok masuk supplier/faktur masuk
+- batch dan expired
+- kartu stok
+- koreksi stok
+- stok opname
+- laporan
+- aktivitas
+- backup/restore
+- audit
+
+Nilai terpenting dari desain ini:
+- histori dijaga
+- stok dilacak per batch
+- transaksi punya jejak audit
+- cut-off laporan 15:00 tidak menghapus data
+- akses dipisahkan per role
+
+Dokumen ini bisa dipakai sebagai blueprint pengembangan lanjutan, checklist audit produk, atau dasar refactor fitur yang belum final.
+
+

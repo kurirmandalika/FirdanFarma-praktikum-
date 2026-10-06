@@ -1,0 +1,648 @@
+RANGKUMAN DESKRIPSI APLIKASI FIRDAN FARMA
+Fokus: Audit Trail dan Role Based Access Control
+Dibuat: 20 September 2026
+
+============================================================
+1. IDENTITAS APLIKASI
+============================================================
+
+Firdan Farma adalah aplikasi desktop apotek offline berbasis C# WinForms,
+.NET Framework 4.8, dan database lokal SQLite. Aplikasi ini ditargetkan
+untuk operasional apotek pada Windows 7 SP1, dengan proses development dan
+build dapat dilakukan dari lingkungan Windows modern.
+
+Aplikasi dirancang agar fungsi utama tidak membutuhkan internet. Seluruh data
+operasional seperti obat, stok, batch, tanggal expired, penjualan, stok masuk,
+user, audit log, laporan, backup, dan restore disimpan di database lokal.
+
+Lokasi database aktif:
+%LOCALAPPDATA%\FirdanFarma\firdan_farma.db
+
+Lokasi backup:
+%LOCALAPPDATA%\FirdanFarma\backup\
+
+Stack utama:
+- C# WinForms
+- .NET Framework 4.8
+- SQLite lokal
+- ClosedXML untuk export Excel
+- System.Drawing.Printing untuk cetak struk melalui printer Windows
+
+============================================================
+2. TUJUAN APLIKASI
+============================================================
+
+Aplikasi Firdan Farma dibuat untuk membantu operasional apotek secara harian,
+khususnya dalam hal:
+
+- login dan pemisahan akses pengguna;
+- pengelolaan master obat;
+- pencatatan stok awal, stok masuk, stok keluar, dan sisa stok;
+- pengelolaan batch obat dan expired date;
+- penjualan Tunai dan QRIS;
+- pemberian diskon sebelum transaksi final;
+- pencetakan struk;
+- stok masuk dari supplier atau faktur;
+- kartu stok dan riwayat mutasi;
+- stok opname;
+- laporan penjualan, stok, expired, batch, koreksi, diskon, dan audit;
+- backup dan restore database lokal;
+- pencatatan audit trail untuk aksi penting.
+
+Prinsip penting aplikasi ini adalah histori tidak boleh dihapus diam-diam.
+Kesalahan input ditangani melalui mekanisme koreksi, pembatalan, atau mutasi
+pembetulan yang tetap meninggalkan jejak audit.
+
+============================================================
+3. MODUL UTAMA APLIKASI
+============================================================
+
+3.1 Login
+
+Pengguna masuk menggunakan username dan password lokal. Password tidak disimpan
+dalam bentuk plaintext, melainkan di-hash dengan PBKDF2-SHA256, salt acak,
+dan 120000 iterasi.
+
+Login berhasil maupun gagal dicatat ke audit log. Login gagal karena username
+tidak ditemukan, akun nonaktif, atau password salah tetap meninggalkan catatan
+audit dengan status GAGAL.
+
+3.2 Dashboard
+
+Dashboard menampilkan ringkasan operasional sesuai role pengguna. Super Admin
+mendapat informasi yang lebih luas, termasuk total besar dan aktivitas semua
+pengguna. Karyawan mendapat ringkasan yang lebih terbatas dan berfokus pada
+aktivitas miliknya.
+
+3.3 Master Obat
+
+Modul obat menyimpan data seperti kode, nama, satuan, kategori, harga beli,
+harga jual, stok minimal, AWL, MSK, KLR, SISA, dan status aktif. Formula stok
+utama adalah:
+
+SISA = AWL + MSK - KLR
+
+Data obat memakai soft delete melalui status aktif/nonaktif. Pengubahan master
+obat dibatasi untuk Super Admin. Perubahan master obat dicatat ke audit log
+dengan snapshot nilai sebelum dan sesudah.
+
+3.4 Stok dan Batch
+
+Stok obat dikelola secara total dan per batch. Batch menyimpan nomor batch,
+expired date, qty masuk, qty keluar, qty tersedia, supplier, dan referensi stok
+masuk. Penjualan menggunakan prinsip FEFO, yaitu batch dengan expired date
+terdekat dipakai lebih dulu. Batch expired tidak boleh dijual.
+
+3.5 Penjualan
+
+Modul penjualan mendukung transaksi Tunai dan QRIS. Setiap transaksi mendapat:
+
+- transaction_no internal;
+- report_code harian, misalnya T1, T2 untuk Tunai dan Q1, Q2 untuk QRIS;
+- transaction_time;
+- report_date;
+- subtotal;
+- diskon;
+- total bersih;
+- user pembuat transaksi;
+- status transaksi.
+
+Diskon divalidasi agar tidak negatif dan tidak melebihi subtotal. Setelah
+transaksi final, stok obat dan saldo batch berkurang. Audit log dibuat untuk
+penjualan, stok keluar, dan pemberian diskon jika ada.
+
+3.6 Cut-off Laporan 15.00
+
+Tanggal laporan tidak mengikuti pergantian hari pukul 00.00. Aturannya:
+
+- transaksi sebelum 15.00 masuk tanggal laporan hari kalender yang sama;
+- transaksi mulai 15.00 masuk tanggal laporan hari berikutnya.
+
+Aturan ini digunakan untuk penjualan dan stok masuk, sehingga laporan harian
+apotek mengikuti pola operasional apotek.
+
+3.7 Stok Masuk
+
+Stok masuk dapat dicatat sebagai input tunggal atau batch faktur supplier.
+Data yang dicatat meliputi supplier, nomor faktur supplier, obat, qty, satuan,
+harga faktur, diskon, PPN, harga beli final, harga jual, batch, expired date,
+total, user, dan catatan.
+
+Sistem menolak nomor faktur yang sama agar faktur tidak tercatat dua kali.
+Setelah tersimpan, stok masuk menambah MSK, membuat atau memperbarui batch,
+mencatat stock movement, dan membuat audit log.
+
+3.8 Kartu Stok
+
+Kartu stok menampilkan riwayat mutasi obat, termasuk tanggal, jam, kode
+transaksi, jenis aktivitas, batch, expired, qty masuk, qty keluar, saldo total
+sebelum dan sesudah, saldo batch sebelum dan sesudah, metode pembayaran, user,
+referensi, reason, dan catatan.
+
+Super Admin dapat memfilter lebih detail termasuk berdasarkan user. Karyawan
+tidak ditampilkan kolom user pada kartu stok.
+
+3.9 Koreksi Stok dan Batch
+
+Koreksi stok membutuhkan izin khusus. Koreksi dapat berupa penambahan atau
+pengurangan stok. Alasan koreksi wajib diisi. Koreksi membuat stock movement
+dan audit log dengan nilai stok sebelum dan sesudah.
+
+Koreksi nomor batch dan expired date lebih ketat karena hanya Super Admin yang
+dapat melakukannya. Perubahan batch/expired wajib memiliki alasan dan dicatat
+ke audit log.
+
+3.10 Stok Opname
+
+Stok opname hanya untuk Super Admin. Saat stok opname aktif, transaksi stok
+lain ditahan agar snapshot tetap konsisten. Stok opname memiliki status DRAFT,
+MENUNGGU_PEMERIKSAAN, SELESAI, atau BATAL.
+
+Setiap item opname menyimpan stok sistem, stok fisik, selisih, batch, expired,
+penghitung, waktu hitung, dan alasan. Jika ada selisih saat posting, alasan
+wajib diisi. Posting opname membuat stock movement dan audit log.
+
+3.11 Laporan
+
+Laporan yang tersedia antara lain:
+
+- laporan stok;
+- laporan penjualan Tunai;
+- laporan penjualan QRIS;
+- laporan penjualan gabungan;
+- laporan stok masuk;
+- laporan expired;
+- laporan batch;
+- laporan koreksi;
+- laporan diskon;
+- laporan audit;
+- aktivitas pengguna.
+
+Sebagian laporan dapat di-export ke Excel. Tampilan laporan juga mengikuti role.
+Contohnya, tab Audit, Batch, Koreksi, dan Diskon hanya tampil untuk Super Admin.
+
+3.12 Backup dan Restore
+
+Backup database membuat salinan file .db ke folder backup. Restore hanya dapat
+dilakukan Super Admin dan membuat safety backup sebelum database aktif diganti.
+Backup dan restore dicatat ke audit log.
+
+============================================================
+4. AUDIT TRAIL
+============================================================
+
+Audit trail adalah salah satu fitur pengawasan inti dalam aplikasi ini. Audit
+digunakan untuk menjawab pertanyaan:
+
+- siapa yang melakukan aksi;
+- kapan aksi dilakukan;
+- role apa yang digunakan;
+- aksi apa yang dilakukan;
+- data atau entitas apa yang terdampak;
+- nilai sebelum dan sesudah perubahan;
+- stok masuk atau keluar berapa;
+- nominal transaksi berapa;
+- diskon berapa;
+- metode pembayaran apa;
+- alasan perubahan atau pembatalan;
+- status aksi berhasil atau gagal.
+
+4.1 Struktur Data Audit
+
+Audit disimpan di tabel audit_logs. Kolom pentingnya adalah:
+
+- id;
+- action;
+- entity;
+- entity_id;
+- user_id;
+- username;
+- role;
+- reason;
+- amount;
+- discount;
+- payment_method;
+- transaction_code;
+- medicine_id;
+- batch_no;
+- qty_in;
+- qty_out;
+- old_value;
+- new_value;
+- status;
+- notes;
+- created_at.
+
+Dengan struktur ini, audit tidak hanya berupa teks bebas. Data audit dapat
+difilter, ditampilkan di laporan, dan digunakan untuk investigasi operasional.
+
+4.2 Layanan Pencatatan Audit
+
+Pencatatan audit dipusatkan di AuditService.LogDetailed. Service ini menerima
+informasi user, aksi, entitas, referensi, nilai sebelum, nilai sesudah, nominal,
+diskon, metode pembayaran, alasan, catatan, status, obat, batch, qty masuk,
+dan qty keluar.
+
+AuditService dapat menulis audit di dalam transaksi database yang sama dengan
+operasi bisnis. Artinya, untuk operasi penting seperti penjualan, stok masuk,
+koreksi stok, pembatalan transaksi, dan stok opname, pencatatan audit ikut
+berada dalam alur transaksi database sehingga lebih konsisten.
+
+4.3 Audit Login dan Logout
+
+Login berhasil dicatat sebagai action LOGIN dengan status BERHASIL.
+Login gagal juga dicatat sebagai LOGIN dengan status GAGAL.
+
+Contoh kondisi login gagal yang dicatat:
+
+- username tidak ditemukan;
+- akun nonaktif;
+- password salah.
+
+Logout dicatat sebagai action LOGOUT.
+
+4.4 Audit Penjualan
+
+Saat transaksi penjualan final disimpan, audit dibuat untuk:
+
+- PENJUALAN;
+- STOK_KELUAR per obat/batch yang berkurang;
+- PEMBERIAN_DISKON jika diskon lebih dari 0.
+
+Audit penjualan menyimpan kode laporan, total transaksi, diskon, metode
+pembayaran, nomor transaksi internal, stok sebelum dan sesudah, batch yang
+keluar, serta qty keluar.
+
+4.5 Audit Stok Masuk
+
+Stok masuk membuat audit untuk:
+
+- STOK_MASUK pada level purchase;
+- STOK_MASUK pada level obat/batch;
+- TAMBAH_OBAT_DARI_STOK_MASUK jika stok masuk membuat obat baru;
+- UPDATE_OBAT_DARI_STOK_MASUK jika stok masuk memperbarui master obat.
+
+Audit menyimpan supplier, nomor faktur, total, batch, qty masuk, harga, serta
+snapshot master obat sebelum dan sesudah bila relevan.
+
+4.6 Audit Koreksi Stok
+
+Koreksi stok dicatat sebagai PENYESUAIAN_STOK. Audit menyimpan:
+
+- stok sebelum;
+- stok sesudah;
+- qty masuk atau keluar;
+- batch yang terdampak;
+- alasan koreksi;
+- user pelaku koreksi.
+
+Alasan koreksi wajib diisi. Tanpa alasan, sistem menolak koreksi.
+
+4.7 Audit Koreksi Batch dan Expired Date
+
+Koreksi batch dicatat sebagai KOREKSI_BATCH. Jika expired date berubah, sistem
+juga mencatat UBAH_EXPIRED_DATE. Audit menyimpan nomor batch dan expired date
+sebelum serta sesudah perubahan. Aksi ini hanya dapat dilakukan Super Admin dan
+wajib memiliki alasan.
+
+4.8 Audit Pembatalan Transaksi
+
+Pembatalan transaksi final hanya dapat dilakukan oleh Super Admin. Alasan wajib
+diisi. Ketika transaksi dibatalkan, sistem:
+
+- mengubah status sale dari FINAL menjadi DIBATALKAN;
+- mengembalikan stok ke batch terkait jika ada;
+- membuat mutasi BATAL_PENJUALAN;
+- mencatat audit STOK_MASUK untuk pengembalian stok;
+- mencatat audit PEMBATALAN_TRANSAKSI.
+
+Audit pembatalan menyimpan status sebelum/sesudah, total, diskon, metode
+pembayaran, alasan, dan catatan bahwa stok dikembalikan.
+
+4.9 Audit Stok Opname
+
+Stok opname dicatat melalui beberapa action:
+
+- MULAI_STOK_OPNAME;
+- HITUNG_STOK_OPNAME;
+- SELESAI_STOK_OPNAME_ITEM;
+- SELESAI_STOK_OPNAME;
+- BATAL_STOK_OPNAME.
+
+Audit opname menyimpan nomor opname, status sebelum/sesudah, stok sistem, stok
+fisik, selisih, alasan, dan mutasi stok hasil posting.
+
+4.10 Audit User Management
+
+Pengelolaan user dicatat sebagai:
+
+- TAMBAH_AKUN;
+- UBAH_AKUN.
+
+Audit menyimpan snapshot lama dan baru yang mencakup username, nama tampilan,
+role, status aktif, izin stok masuk, izin koreksi stok, dan informasi bahwa
+password diubah bila ada perubahan password.
+
+4.11 Audit Backup dan Restore
+
+Backup database dicatat sebagai BACKUP_DATABASE. Restore database dicatat
+sebagai RESTORE_DATABASE. Restore hanya dapat dilakukan Super Admin dan membuat
+safety backup sebelum mengganti database aktif.
+
+4.12 Tampilan Audit dan Aktivitas
+
+Terdapat dua konsep tampilan pengawasan:
+
+1. Aktivitas
+   - dapat dibuka dari menu Aktivitas;
+   - Super Admin melihat aktivitas semua user;
+   - Karyawan hanya melihat aktivitas miliknya;
+   - filter tersedia berdasarkan tanggal dan jenis aksi;
+   - Super Admin juga dapat memfilter berdasarkan username.
+
+2. Laporan Audit
+   - hanya tersedia untuk Super Admin;
+   - menampilkan detail audit yang lebih lengkap, termasuk nilai sebelum dan
+     nilai sesudah;
+   - dapat difilter berdasarkan tanggal, user, dan action;
+   - dapat di-export ke Excel.
+
+Karyawan tidak diberi akses ke audit detail semua user. Pada tampilan aktivitas
+karyawan, beberapa kolom sensitif disembunyikan, seperti Role, Batch, Diskon,
+Alasan, Nilai Sebelum, dan Nilai Sesudah.
+
+============================================================
+5. ROLE BASED ACCESS CONTROL (RBAC)
+============================================================
+
+RBAC pada aplikasi Firdan Farma menggunakan dua role utama, ditambah permission
+tambahan pada level akun.
+
+Role utama:
+
+- KARYAWAN;
+- SUPER_ADMIN.
+
+Permission tambahan:
+
+- can_purchase, yaitu izin input stok masuk;
+- can_adjust_stock, yaitu izin koreksi stok.
+
+Pada model user, Super Admin selalu dianggap memiliki seluruh permission efektif.
+Artinya, walaupun permission tambahan disimpan di database, Super Admin tetap
+dianggap boleh stok masuk dan boleh koreksi stok.
+
+5.1 Data User
+
+Data user disimpan di tabel users dengan kolom utama:
+
+- id;
+- username;
+- display_name;
+- role;
+- password_hash;
+- is_active;
+- can_purchase;
+- can_adjust_stock;
+- created_at;
+- updated_at.
+
+Role dibatasi oleh constraint database hanya boleh bernilai KARYAWAN atau
+SUPER_ADMIN.
+
+5.2 Akun Awal Development
+
+Aplikasi menyiapkan akun awal:
+
+- username: alfian
+  role: SUPER_ADMIN
+  password awal: alfian
+  izin stok masuk: ya
+  izin koreksi stok: ya
+
+- username: apotek01
+  role: KARYAWAN
+  password awal: apotek01
+  izin stok masuk: ya
+  izin koreksi stok: tidak
+
+Password awal wajib diganti sebelum produksi.
+
+5.3 Hak Akses Karyawan
+
+Karyawan adalah role operasional harian. Akses utama:
+
+- login aplikasi;
+- melihat dashboard terbatas;
+- membuka menu Obat;
+- membuka menu Penjualan;
+- membuka menu Kartu Stok;
+- membuka menu Laporan yang diperbolehkan;
+- membuka menu Aktivitas milik sendiri;
+- melakukan penjualan Tunai/QRIS;
+- memberikan diskon sesuai validasi transaksi;
+- mencetak struk;
+- melihat stok dan stok expired dalam batas tampilan yang diperbolehkan;
+- input stok masuk jika can_purchase aktif;
+- koreksi stok jika can_adjust_stock aktif.
+
+Batasan Karyawan:
+
+- tidak dapat mengelola user;
+- tidak dapat membuka Master Data;
+- tidak dapat membuka Backup/Restore;
+- tidak dapat membuka Stok Opname;
+- tidak dapat membatalkan transaksi final;
+- tidak dapat melihat audit detail semua user;
+- tidak dapat melihat nilai sebelum/sesudah pada audit detail;
+- tidak dapat mengubah master obat jika fitur tersebut menuntut Super Admin.
+
+5.4 Hak Akses Super Admin
+
+Super Admin adalah role administrasi dan pengawasan penuh. Akses utama:
+
+- seluruh akses operasional Karyawan;
+- mengelola akun user;
+- mengubah role user;
+- mengatur status aktif/nonaktif user;
+- mengatur permission stok masuk dan koreksi stok;
+- mengelola master obat;
+- mengelola kategori dan supplier;
+- membuka Stok Opname;
+- melakukan koreksi batch dan expired date;
+- melakukan pembatalan transaksi final dengan alasan wajib;
+- melihat aktivitas semua user;
+- melihat laporan audit detail;
+- melihat laporan batch, koreksi, diskon, dan audit;
+- melakukan backup database;
+- melakukan restore database.
+
+5.5 Kontrol Menu Berdasarkan Role
+
+MainForm membangun sidebar berdasarkan role dan permission user.
+
+Menu umum:
+
+- Beranda;
+- Obat;
+- Penjualan;
+- Kartu Stok;
+- Laporan;
+- Aktivitas;
+- Ganti Pengguna.
+
+Menu bersyarat:
+
+- Stok Opname hanya tampil untuk Super Admin;
+- Koreksi Stok tampil jika user memiliki CanAdjustStockEffective;
+- Pengguna hanya tampil untuk Super Admin;
+- Master Data hanya tampil untuk Super Admin;
+- Backup hanya tampil untuk Super Admin.
+
+Pada modul Obat, tombol Stok Masuk hanya tampil jika user memiliki
+CanPurchaseEffective. Fitur untuk melihat atau mengelola data nonaktif lebih
+luas diberikan kepada Super Admin.
+
+5.6 Kontrol Service Layer
+
+Aplikasi tidak hanya menyembunyikan menu di UI, tetapi juga melakukan validasi
+di service layer. Ini penting karena pembatasan akses tidak hanya bergantung
+pada tombol yang terlihat.
+
+Contoh kontrol service:
+
+- UserService.RequireSuper menolak akses jika user bukan Super Admin.
+- UserService.Save hanya dapat dipanggil Super Admin.
+- MasterService untuk kategori dan supplier mewajibkan Super Admin.
+- MedicineService.Save untuk master obat mewajibkan Super Admin.
+- MedicineService.SetActive mewajibkan Super Admin.
+- MedicineService.AdjustStock membutuhkan CanAdjustStockEffective.
+- MedicineService.CorrectBatch mewajibkan Super Admin.
+- TransactionService.SavePurchase membutuhkan CanPurchaseEffective.
+- TransactionService.CancelSale mewajibkan Super Admin.
+- StockOpnameService seluruh operasi utama mewajibkan Super Admin.
+- ReportService.Audit mewajibkan Super Admin.
+- ExcelBackupService.RestoreDatabase mewajibkan Super Admin.
+
+5.7 Aturan Keamanan User Management
+
+User management memiliki beberapa pengaman:
+
+- hanya Super Admin yang dapat menambah atau mengubah akun;
+- username minimal 3 karakter;
+- nama tampilan wajib diisi;
+- role harus KARYAWAN atau SUPER_ADMIN;
+- password akun baru wajib diisi;
+- password minimal 6 karakter;
+- akun yang sedang dipakai tidak boleh dinonaktifkan;
+- role akun yang sedang dipakai tidak boleh diturunkan selama sesi aktif;
+- minimal harus ada satu Super Admin aktif;
+- jika role adalah SUPER_ADMIN, izin stok masuk dan koreksi otomatis aktif;
+- perubahan user dicatat ke audit log dengan old_value dan new_value.
+
+5.8 RBAC pada Laporan dan Aktivitas
+
+Laporan juga mengikuti role:
+
+- Karyawan dapat melihat laporan operasional yang diperbolehkan;
+- laporan stok masuk hanya muncul jika user punya izin stok masuk;
+- supplier dapat disembunyikan dari tampilan tertentu untuk non Super Admin;
+- tab Batch, Koreksi, Diskon, dan Audit hanya muncul untuk Super Admin;
+- Activity untuk Karyawan hanya mengambil audit dengan user_id miliknya;
+- Activity untuk Super Admin mengambil audit semua pengguna dan dapat difilter.
+
+5.9 RBAC pada Operasi Berisiko
+
+Operasi yang berdampak besar dibatasi lebih ketat:
+
+- pembatalan transaksi: Super Admin, alasan wajib;
+- restore database: Super Admin;
+- stok opname: Super Admin;
+- koreksi batch/expired: Super Admin;
+- edit master data: Super Admin;
+- pengelolaan user: Super Admin;
+- koreksi stok: Super Admin atau Karyawan dengan izin koreksi stok;
+- stok masuk: Super Admin atau Karyawan dengan izin stok masuk.
+
+============================================================
+6. KEANDALAN DATA DAN PENGENDALIAN RISIKO
+============================================================
+
+Aplikasi menerapkan beberapa pengendalian data:
+
+- SQLite foreign key diaktifkan;
+- journal mode WAL digunakan;
+- stok tidak boleh negatif;
+- transaksi stok ditahan saat stok opname aktif;
+- nomor faktur supplier dicegah agar tidak duplikat;
+- report_code unik per tanggal laporan;
+- transaksi final tidak diedit diam-diam;
+- pembatalan transaksi mengubah status dan mengembalikan stok;
+- histori stok masuk tidak dibalik dengan menghapus mutasi;
+- migrasi database membuat pre-migration backup jika schema lama ditemukan;
+- restore database membuat safety backup;
+- audit log dibuat untuk aksi penting.
+
+============================================================
+7. DATABASE UTAMA
+============================================================
+
+Tabel utama yang digunakan:
+
+- users;
+- medicines;
+- categories;
+- suppliers;
+- medicine_batches;
+- sales;
+- sale_items;
+- sale_item_batches;
+- purchases;
+- purchase_items;
+- stock_movements;
+- audit_logs;
+- stock_opnames;
+- stock_opname_items;
+- app_settings;
+- schema_info.
+
+Schema database saat ini berada pada versi 9.
+
+============================================================
+8. BATASAN DAN FITUR BELUM FINAL
+============================================================
+
+Berdasarkan dokumen proyek, beberapa hal belum menjadi scope final atau belum
+tersedia:
+
+- modul faktur penuh masih belum final;
+- barcode scanner belum tersedia;
+- sinkronisasi cloud belum tersedia;
+- multi cabang belum tersedia;
+- multi terminal real-time belum tersedia;
+- kompatibilitas Windows 7 harus tetap diuji langsung pada perangkat target
+  sebelum go-live.
+
+============================================================
+9. KESIMPULAN
+============================================================
+
+Firdan Farma adalah aplikasi apotek offline yang cukup lengkap untuk operasional
+harian: mulai dari login, penjualan, stok, batch, expired date, stok masuk,
+laporan, backup, restore, hingga stok opname.
+
+Bagian audit trail menjadi kekuatan penting aplikasi ini karena hampir semua
+aksi berisiko meninggalkan jejak yang terstruktur. Audit mencatat user, role,
+waktu, aksi, entitas, referensi transaksi, stok sebelum/sesudah, batch, qty,
+nominal, diskon, pembayaran, alasan, status, dan catatan.
+
+Bagian role based access juga diterapkan berlapis. UI menampilkan menu sesuai
+role dan permission, sementara service layer tetap melakukan pengecekan ulang
+untuk mencegah akses tidak sah. Super Admin memiliki akses penuh untuk kontrol,
+pengawasan, dan operasi berisiko. Karyawan berfokus pada operasional harian dan
+dapat diberi izin tambahan secara selektif untuk stok masuk atau koreksi stok.
+
+Dengan kombinasi audit trail dan RBAC tersebut, aplikasi ini mendukung kebutuhan
+apotek untuk menjaga akurasi stok, memisahkan tanggung jawab pengguna, serta
+menelusuri kembali perubahan data ketika terjadi salah input atau kebutuhan
+review operasional.

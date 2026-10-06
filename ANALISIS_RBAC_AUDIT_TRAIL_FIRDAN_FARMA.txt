@@ -1,0 +1,1086 @@
+ANALISIS IMPLEMENTASI ROLE-BASED ACCESS CONTROL (RBAC)
+DAN AUDIT TRAIL PADA SISTEM KASIR DAN MANAJEMEN STOK
+APOTEK FIRDAN FARMA
+
+Tanggal pemeriksaan: 2 Oktober 2026
+Status: analisis source code dan dokumentasi repository, bukan sertifikasi keamanan.
+
+============================================================
+0. TUJUAN, CAKUPAN, DAN CARA MEMBACA
+============================================================
+Dokumen ini memusatkan analisis pada autentikasi, otorisasi berbasis role,
+permission stok, pencatatan audit, pembatasan tampilan aktivitas, keterkaitan
+audit dengan transaksi kasir dan ledger stok, serta batas keamanan implementasi.
+
+Cakupan kode utama:
+- Models/AppUser.cs
+- Security/PasswordHasher.cs
+- Data/Database.cs
+- Core/AppPaths.cs dan Core/AppClock.cs
+- Services/AuthService.cs, UserService.cs, AuditService.cs, MasterService.cs
+- Services/MedicineService.cs, TransactionService.cs, StockOpnameService.cs
+- Services/ReportService.cs, ExcelBackupService.cs, ReceiptService.cs
+- UI/LoginForm.cs, MainForm.cs, DashboardPanel.cs, MedicinePanel.cs,
+  SalePanel.cs, PurchasePanel.cs, StockPanels.cs, ReportsPanel.cs,
+  AdminPanels.cs
+- Dokumen RBAC_AUDIT_TRAIL_LENGKAP.txt, MANUAL_TESTS.md, PRD.md, panduan,
+  blueprint, README dan changelog.
+
+Urutan otoritas fakta yang digunakan:
+1. Source code aktual untuk perilaku yang berjalan.
+2. Dokumentasi kebutuhan untuk maksud/desain yang dituju.
+3. Dokumen rangkuman lama sebagai petunjuk yang perlu diverifikasi.
+
+Maka, setiap pernyataan dibedakan sebagai:
+- IMPLEMENTASI: perilaku yang tampak pada source code.
+- KEBUTUHAN/DOKUMENTASI: maksud yang tertulis pada PRD/manual.
+- TEMUAN: perbedaan, celah enforcement, atau risiko yang perlu diuji/diperbaiki.
+
+Analisis tidak mengeklaim bahwa checklist sudah lulus, aplikasi memenuhi standar
+regulasi tertentu, atau audit memiliki sifat anti-manipulasi. Repository
+menyediakan checklist manual, bukan bukti hasil seluruh pengujian.
+
+============================================================
+1. RINGKASAN EKSEKUTIF
+============================================================
+Aplikasi Firdan Farma adalah desktop Windows offline dengan C# WinForms,
+.NET Framework 4.8 dan database SQLite lokal. RBAC memiliki dua role:
+KARYAWAN dan SUPER_ADMIN, ditambah dua flag akun: can_purchase dan
+can_adjust_stock. Role/flag disimpan di tabel users, dimuat ke object AppUser
+saat login, lalu dipakai untuk membangun menu UI dan memeriksa beberapa operasi
+pada service layer.
+
+Audit berada di tabel audit_logs pada database yang sama dengan transaksi.
+AuditService.LogDetailed menjadi writer bersama dengan kolom identitas, aksi,
+entitas/referensi, stok, nominal, diskon, metode pembayaran, old/new value,
+alasan, status, notes dan waktu lokal. Banyak operasi mutasi memakai koneksi
+serta transaksi SQLite yang sama untuk perubahan bisnis, stock movement dan
+audit. Jika operasi rollback, audit dalam transaksi tersebut juga rollback.
+
+Penilaian ringkas:
+- Kontrol mutasi akun, master, stok, stok masuk, pembatalan, opname, restore,
+  import dan laporan audit memiliki pemeriksaan service di beberapa jalur inti.
+- Aktivitas memiliki pembatasan baris berdasarkan akun untuk Karyawan dan
+  laporan Audit secara eksplisit membatasi Super Admin.
+- Kontrol tidak merata: beberapa pembacaan sensitif, ekspor, backup, dan
+  informasi opname dibatasi hanya oleh UI atau tidak diperiksa oleh service.
+- Identitas sesi adalah object AppUser mutable yang diberikan caller; service
+  tidak memverifikasi ulang sesi ke database pada setiap operasi.
+- Audit lokal bukan ledger immutable: pemilik akses tulis file DB dapat
+  mengubah/menghapusnya di luar aplikasi.
+- Ada risiko pengelompokan Activity: report_code T1/T2 atau Q1/Q2 berulang pada
+  tanggal laporan berbeda, sedangkan query Activity mengelompokkan hanya dengan
+  transaction_code. Baris dari transaksi yang berbeda dapat tergabung menjadi
+  satu ringkasan.
+- Kolom yang disembunyikan dari grid Karyawan tidak selalu dihapus dari
+  DataTable yang diekspor; export dapat tetap membawa kolom tersembunyi.
+
+Kesimpulan: implementasi menyediakan RBAC praktis dan audit operasional yang
+bermanfaat, tetapi batas akses baca/export dan integritas audit perlu diperkuat
+bila dimaksudkan sebagai kontrol keamanan yang kuat.
+
+============================================================
+2. KONTEKS SISTEM DAN OBJEK YANG DILINDUNGI
+============================================================
+Data yang berpengaruh pada pengendalian internal apotek:
+- akun, password hash, role, status dan izin;
+- master obat, kategori, supplier, harga dan status aktif;
+- stok AWL/MSK/KLR/SISA;
+- batch, tanggal kedaluwarsa dan saldo batch;
+- transaksi Tunai/QRIS, diskon, kasir, detail item dan status;
+- stok masuk/faktur supplier;
+- koreksi stok, pembatalan penjualan dan stok opname;
+- kartu stok/stock movement;
+- audit, backup, restore, laporan dan file ekspor.
+
+Hubungan dua ledger:
+- stock_movements menjawab pergerakan jumlah: obat/batch, masuk/keluar,
+  saldo sebelum/sesudah, waktu dan referensi.
+- audit_logs menjawab konteks pengawasan: pelaku, role, action, alasan,
+  nilai sebelum/sesudah, nominal, metode bayar, status dan catatan.
+
+Untuk menyelidiki selisih stok, keduanya perlu dicocokkan. Audit tidak
+menggantikan ledger stok, dan ledger stok tidak menjelaskan sepenuhnya siapa,
+mengapa atau konteks persetujuan.
+
+Database aktif berada pada %LOCALAPPDATA%\FirdanFarma\firdan_farma.db.
+Backup default berada pada %LOCALAPPDATA%\FirdanFarma\backup\. Tidak ada
+server identitas atau audit terpusat. Fungsi ini dirancang untuk satu komputer,
+bukan multi-terminal real-time.
+
+============================================================
+3. MODEL RBAC YANG DIIMPLEMENTASIKAN
+============================================================
+3.1 Komponen
+- Subject/principal: AppUser, dibentuk setelah login.
+- Role: string KARYAWAN atau SUPER_ADMIN.
+- Permission tambahan: CanPurchase dan CanAdjustStock.
+- Resource/operasi: service dan layar aplikasi untuk transaksi, stok,
+  administrasi dan laporan.
+- Policy check: cabang UI serta guard di service tertentu.
+
+3.2 Tabel users
+Kolom pokok:
+- id: primary key.
+- username: wajib dan unik.
+- display_name: nama yang ditampilkan.
+- role: NOT NULL, CHECK hanya KARYAWAN atau SUPER_ADMIN.
+- password_hash.
+- is_active: status akun.
+- can_purchase: default 1 pada schema.
+- can_adjust_stock: default 0 pada schema.
+- created_at dan updated_at.
+
+3.3 Perhitungan permission efektif
+Pada AppUser:
+- IsSuperAdmin bernilai true jika Role sama dengan SUPER_ADMIN tanpa
+  membedakan kapitalisasi.
+- CanPurchaseEffective = IsSuperAdmin OR CanPurchase.
+- CanAdjustStockEffective = IsSuperAdmin OR CanAdjustStock.
+
+Saat login, AuthService juga memaksa kedua izin menjadi true bagi role
+SUPER_ADMIN, terlepas nilai flag database. UserService.Save menyimpan flag
+Super Admin sebagai true dan UI menonaktifkan checkbox permission untuk role
+tersebut.
+
+KARYAWAN mengikuti dua flag akun. Tidak ada role ketiga, role inheritance,
+permission per menu yang bebas dikonfigurasi, atau matriks hak akses dinamis.
+
+3.4 Akun development
+Database memastikan akun development alfian (SUPER_ADMIN) dan apotek01
+(KARYAWAN) jika username tersebut belum ada; password awal pada source sama
+dengan username masing-masing. Jika username standar telah ada, fungsi tidak
+mengganti record tersebut. Alias lama admin1/admin/karyawan dapat dimigrasikan
+menjadi akun standar dengan password awal development dan status aktif.
+Kredensial development wajib diganti sebelum deployment.
+
+3.5 Kebijakan manajemen user
+UserService.Save menerapkan:
+- pemeriksaan actor Super Admin;
+- username di-trim, minimal 3 karakter;
+- display name tidak boleh kosong;
+- role harus dua nilai yang didukung;
+- akun baru harus diberi password;
+- password yang diubah minimal 6 karakter;
+- username duplikat diterjemahkan menjadi pesan yang dapat dibaca;
+- actor tidak dapat menonaktifkan dirinya sendiri;
+- actor tidak dapat menurunkan role sendiri selama sesi aktif;
+- minimal satu Super Admin aktif harus tersisa;
+- password tidak dicantumkan di audit, hanya indikator "password=diubah".
+
+Belum terlihat kebijakan kompleksitas password selain panjang minimal, MFA,
+rate limiting, lockout, rotasi berkala, atau pemulihan password terverifikasi.
+
+============================================================
+4. AUTENTIKASI DAN MASA BERLAKU SESI
+============================================================
+4.1 Login
+LoginForm meminta username dan password. Pesan untuk operator bersifat umum:
+"Username/password salah atau akun nonaktif." Login service:
+1. Trim username.
+2. Ambil record users berdasarkan username.
+3. Tolak username yang tidak ada atau is_active bukan 1.
+4. Verifikasi password_hash melalui PasswordHasher.
+5. Bangun AppUser dengan id, username, display name, role, IsActive=true,
+   serta permission efektif.
+6. Catat LOGIN berhasil atau gagal.
+
+4.2 Hash password
+PasswordHasher menggunakan PBKDF2-SHA256, salt acak 16 byte, output hash 32
+byte, 120.000 iterasi. String tersimpan memuat algoritma, iterasi, salt dan
+hash. Verify menolak format tidak dikenal dan membandingkan byte dengan loop
+fixed-time.
+
+Ini lebih baik daripada plaintext, tetapi tidak menambah faktor autentikasi,
+tidak mencegah brute force secara aplikasi, dan keamanan tetap bergantung pada
+password yang dipilih dan perlindungan akun Windows/database.
+
+4.3 Audit autentikasi
+- Username tidak ditemukan/nonaktif: LOGIN status GAGAL, usernameOverride,
+  role kosong, entity_id kosong karena cabang kode memakai jalur gabungan.
+- Password salah: LOGIN GAGAL dengan user id dan role dari record, username.
+- Berhasil: LOGIN BERHASIL dengan user id, username dan role.
+- Logout: LOGOUT BERHASIL saat pengguna memilih Ganti Pengguna atau MainForm
+  ditutup.
+- Tidak ada action bernama LOGIN_GAGAL; filter UI khusus menafsirkan action
+  LOGIN dengan status GAGAL.
+- Jika penulisan audit login gagal karena DB/I/O, tidak ada fallback log
+  eksternal yang tampak.
+
+4.4 Umur/validasi sesi
+AppUser adalah object dengan properti Id, Username, DisplayName, Role,
+IsActive, CanPurchase, CanAdjustStock yang dapat diset pada object. Login
+menginisialisasi IsActive=true, tetapi service tidak memeriksa ulang status
+akun/permission dari DB untuk setiap operasi. UserService.RequireSuper hanya
+memeriksa null dan IsSuperAdmin. Operasi lain memeriksa permission dari object
+sesi yang diberikan.
+
+Implikasi:
+- Perubahan permission/role saat sesi berjalan tidak otomatis memperbarui
+  AppUser yang sudah ada; sesi perlu login ulang agar mendapat nilai baru.
+- Tidak ada session id, token yang ditandatangani, revalidasi akun aktif atau
+  revocation check per operasi.
+- Dalam aplikasi desktop lokal, ini bukan endpoint jaringan; tetapi service
+  mempercayai object caller dan tidak menjadi batas keamanan terhadap kode lain
+  di proses yang sama atau modifikasi lokal.
+- Menonaktifkan akun dari sesi/proses lain tidak terlihat otomatis memutus
+  sesi yang telah terbentuk.
+
+============================================================
+5. TITIK PENEGAKAN AKSES: UI VS SERVICE VS DATABASE
+============================================================
+5.1 Lapisan UI
+MainForm menambah atau tidak menambah menu berdasarkan AppUser. ReportsPanel
+menambahkan tab tertentu hanya untuk Super Admin. MedicinePanel menampilkan
+kontrol edit/nonaktif hanya untuk Super Admin dan tombol Stok Masuk sesuai
+permission. Dialog dan tombol tertentu mengulang pemeriksaan tampilan. Ini
+menyederhanakan UI, tetapi penyembunyian bukan kontrol otorisasi yang memadai
+jika hasil data atau service tetap dapat dipanggil dari jalur lain di proses.
+
+5.2 Guard yang memang ada di service
+- UserService.Save -> Super Admin.
+- MasterService.SaveCategory/SaveSupplier -> Super Admin.
+- MedicineService.Save/SetActive/CorrectBatch -> Super Admin.
+- MedicineService.AdjustStock -> CanAdjustStockEffective.
+- TransactionService.SavePurchase -> CanPurchaseEffective.
+- TransactionService.CancelSale -> Super Admin.
+- StockOpnameService.List/Start/SaveCount/Complete/Cancel -> Super Admin.
+- ReportService.Activity -> requester wajib ada; Karyawan difilter ke
+  user_id sendiri; Super Admin dapat semua/dapat filter user.
+- ReportService.Audit -> Super Admin.
+- ExcelBackupService.RestoreDatabase/ImportMedicines -> Super Admin.
+- TransactionService.SaveSale -> user object wajib tidak null.
+
+5.3 Lapisan database
+- CHECK role pada users.
+- username unik.
+- foreign key diaktifkan per koneksi.
+- beberapa CHECK pada stok dan harga obat.
+- transaksi SQLite membungkus sejumlah operasi multi-tabel.
+- index audit created_at dan (user_id, created_at).
+
+Database bukan pengganti policy RBAC: selain constraint role, tidak ada row-level
+security SQLite yang memisahkan query berdasarkan user. Pemilik akses file DB
+bisa membuka SQLite di luar aplikasi.
+
+============================================================
+6. MATRIKS AKSES TERPERINCI
+============================================================
+Legenda:
+- UI = kontrol menu/tombol/tab.
+- SERVICE = pemeriksaan otorisasi dalam service.
+- DB = constraint/transaction pendukung.
+- "UI saja" berarti jalur normal UI tersembunyi, tetapi method read/export yang
+  disebut tidak memeriksa role secara mandiri.
+
+Operasi                                  KARYAWAN               SUPER_ADMIN
+--------------------------------------------------------------------------
+Login akun aktif                         Ya                     Ya
+Membuat penjualan Tunai/QRIS              Ya                     Ya
+Memberi diskon penjualan                  Ya                     Ya
+Mencetak struk                            Ya                     Ya
+Membaca master obat aktif                 Ya                     Ya
+Melihat obat nonaktif                     Tidak di UI            Ya
+Tambah/ubah master obat                   Tidak                  Ya
+Aktif/nonaktif obat                       Tidak                  Ya
+Melihat batch dan expiry                  Ya                     Ya
+Koreksi batch/expiry                      Tidak                  Ya
+Input stok masuk                          Jika can_purchase      Ya
+Koreksi stok                              Jika can_adjust_stock  Ya
+Membatalkan transaksi FINAL               Tidak                  Ya, reason wajib
+Stok opname                               Tidak                  Ya
+Kelola akun/role/permission               Tidak                  Ya
+Kelola kategori/supplier                  Tidak                  Ya
+Laporan Tunai/QRIS/Gabungan               Ya                     Ya
+Laporan stok/expired                      Ya                     Ya
+Laporan stok masuk                        Jika can_purchase      Ya
+Tab laporan Batch/Koreksi/Diskon/Audit    Tidak di UI            Ya
+Activity                                  Milik sendiri          Semua user
+Kolom audit before/after                  Tidak pada Activity UI Ya pada Activity/Audit
+Backup database                           Tombol tidak tersedia  Ya di UI
+Restore database                          Tidak                  Ya, service guard
+Import obat Excel                         Tidak di UI            Ya jika dipanggil,
+                                                                  service guard
+Export laporan                            Data yang tersedia     Ya
+Edit stok masuk tersimpan                 Tidak                 Ditolak service
+
+Catatan interpretasi:
+1. "Tidak di UI" tidak otomatis berarti service menolak. Baca subbagian 7
+   untuk method yang tidak memiliki actor guard.
+2. Karyawan dapat melihat daftar transaksi penjualan pada tab laporan; query
+   UI tidak memasang filter user_id. Jadi laporan penjualan bukan riwayat kasir
+   milik sendiri saja.
+3. Export mengikuti DataTable yang diberikan UI. Menyembunyikan kolom grid
+   tidak sama dengan menghapus kolom dari DataTable.
+4. Beberapa menu menampilkan data lebih luas dari mutasi yang boleh dilakukan.
+   Contoh, read-only kartu stok dapat digunakan Karyawan.
+
+============================================================
+7. MATRIKS ENFORCEMENT SERVICE PER MODUL
+============================================================
+7.1 User dan akun
+- UI: menu Pengguna hanya ditambahkan untuk Super Admin.
+- Write service: UserService.Save memanggil RequireSuper.
+- Read service: UserService.List() tidak menerima actor dan tidak memeriksa
+  role; pembatasannya berada pada MainForm/UI.
+- Validasi akun dan audit: dijabarkan pada bagian 3.
+
+7.2 Master obat
+- UI: MedicinePanel menunjukkan edit, aktif/nonaktif dan checkbox tampil
+  nonaktif hanya untuk Super Admin.
+- Write service: Save memeriksa `user != null && user.IsSuperAdmin`; SetActive
+  dan CorrectBatch memanggil RequireSuper.
+- Read service: MedicineService.List(search, includeInactive) dan Batches(id)
+  tidak menerima AppUser. Pemanggil dapat memberi includeInactive=true.
+- Penjualan: hanya mengambil obat aktif dan menghitung kelayakan stok.
+
+7.3 Kategori dan supplier
+- Write service: SaveCategory dan SaveSupplier memanggil RequireSuper.
+- Read service: Categories/Suppliers tidak menerima actor; tampilan master data
+  hanya Super Admin, tetapi service tidak mengotorisasi pembacaan.
+- EnsureCategory/EnsureSupplier dipanggil sebagai helper dalam transaksi
+  stok masuk dan dapat membuat master secara implisit.
+
+7.4 Stok masuk
+- UI: tombol Stok Masuk hanya bila CanPurchaseEffective.
+- Write service: setiap overload SavePurchase memeriksa izin efektif.
+- Edit: UpdatePurchase mewajibkan Super Admin lalu selalu melempar exception
+  bahwa stok masuk tersimpan tidak dapat diedit.
+- Read service: PurchaseHeader/PurchaseItems tidak memeriksa actor.
+- Laporan: tab hanya dipasang untuk user berizin; fungsi ReportService.StockIn
+  tidak memeriksa user/role dan menerima includeSupplier yang dapat bernilai
+  true.
+
+7.5 Koreksi stok
+- UI: menu Koreksi Stok hanya untuk CanAdjustStockEffective.
+- Write service: AdjustStock memeriksa flag efektif, delta != 0 dan alasan.
+  Stok negatif ditolak; transaksi ditolak selama opname aktif.
+- Koreksi batch berbeda: CorrectBatch hanya Super Admin dan alasan wajib.
+
+7.6 Penjualan dan pembatalan
+- UI: Penjualan tersedia untuk kedua role.
+- SaveSale service hanya menolak user null, bukan role tertentu; keduanya dapat
+  menjual. Validasi transaksi/batch/stok tidak negatif diproses dalam
+  transaction SQLite.
+- CancelSale service memeriksa Super Admin, status FINAL, alasan dan tidak ada
+  opname aktif.
+- UI tombol pembatalan hanya di tab Gabungan Super Admin.
+- Sales/SalesOperational/RecentFinalSales report methods tidak memeriksa role
+  atau row scope; UI memberi laporan ke Karyawan dan Admin yang sama-sama
+  memuat transaksi semua kasir.
+- ReceiptService.PrintSale tidak menerima AppUser dan tidak memeriksa role.
+
+7.7 Stok opname
+- Constructor UI dan List/Start/SaveCount/Complete/Cancel service memeriksa
+  Super Admin.
+- Items(opnameId), PostingSummary(opnameId) dan Status(opnameId) tidak
+  menerima user dan tidak memeriksa role; UI memanggilnya hanya dari panel
+  Super Admin.
+- Tidak ada transisi submit DRAFT -> MENUNGGU_PEMERIKSAAN pada source/UI yang
+  ditemukan. Complete dapat dijalankan pada DRAFT setelah semua item dihitung;
+  pemisahan checker-approver belum enforced.
+
+7.8 Laporan, aktivitas dan audit
+- ReportService.Activity: guard requester != null; jika bukan Super Admin,
+  query dipaksa ke user_id requester; filter userId dari UI tidak diberikan
+  kepada Karyawan. Ini enforcement row-scope di service.
+- ReportService.Audit: memanggil RequireSuper; ini service-level guard.
+- Dashboard dan RecentActivity menerima AppUser tetapi tidak memakai RequireSuper.
+  RecentActivity memakai flag IsSuperAdmin untuk menentukan data semua user
+  atau user_id sendiri. Dashboard query menghitung agregat admin juga; UI
+  Karyawan hanya menampilkan kartu terbatas.
+- Sales*, StockIn, StockSnapshot, StockCard, Expiring, Batches, Corrections,
+  DiscountReport, RecentFinalSales tidak menerima actor yang diverifikasi.
+  Pembatasan beberapa laporan dilakukan dengan tidak menampilkan tab di UI.
+- StockCard menerima parameter username dan menghasilkan kolom User tanpa
+  memvalidasi role.
+
+7.9 Backup, restore, import, export
+- RestoreDatabase memanggil RequireSuper, memblokir opname aktif, membuat
+  safety backup, mengganti DB, menginisialisasi ulang, dan mencoba recovery
+  dari safety backup pada exception.
+- ImportMedicines memanggil RequireSuper dan membuat backup sebelum import.
+- BackupDatabase(AppUser user = null, ...) tidak memanggil RequireSuper.
+  user null dibolehkan dan berarti tidak ada audit BACKUP_DATABASE.
+- ExportTable(DataTable,...), ExportMedicines(path) tidak menerima actor dan
+  tidak melakukan role check. Di UI tombol/halaman memutuskan kapan dipanggil.
+
+============================================================
+8. TEMUAN KHUSUS RBAC PADA READ DAN EXPORT
+============================================================
+Temuan ini berkenaan dengan perbedaan antara apa yang tampak di layar dan
+apa yang masih tersedia pada data/service.
+
+8.1 Laporan sensitif dibatasi terutama di UI
+ReportsPanel menambahkan tab Batch, Koreksi, Diskon dan Audit hanya untuk
+Super Admin. Dari service:
+- Audit memiliki RequireSuper yang benar.
+- Batches, Corrections dan DiscountReport tidak menerima AppUser/role.
+- Karena itu kontrol service untuk ketiga query tersebut tidak sekuat kontrol
+  UI. Ini aplikasi desktop lokal, bukan HTTP API; temuan berarti enforcement
+  tidak konsisten di batas lapisan service, bukan bukti remote exploit.
+
+8.2 Fungsi baca administratif tidak actor-aware
+Contoh yang relevan: UserService.List, MasterService.Categories/Suppliers,
+MedicineService.List(includeInactive), MedicineService.Batches,
+TransactionService.PurchaseHeader/PurchaseItems, StockOpnameService.Items/
+PostingSummary/Status. UI merutekan fitur administratif dengan role, tetapi
+metode tersebut sendiri tidak memastikan requester.
+
+8.3 Ekspor dapat mempertahankan kolom grid tersembunyi
+- StockCardPanel menerima DataTable berisi kolom User; untuk Karyawan hanya
+  kolom DataGridView diset Visible=false. Export menggunakan DataSource
+  DataTable utuh. Maka kolom User masih dapat ikut file Excel.
+- ActivityPanel menyembunyikan kolom Role, Batch, Diskon, Alasan, old/new dari
+  grid Karyawan, tetapi export juga menggunakan DataTable. Activity service
+  telah membatasi baris ke user tersebut dan tidak menyertakan kolom old/new
+  untuk Karyawan, tetapi kolom lain yang hanya disembunyikan dapat ikut export.
+- DashboardPanel memakai RecentActivity dan tidak menghapus kolom sensitif
+  dari DataTable; query membatasi baris Karyawan ke user sendiri, tetapi
+  mengembalikan detail lama/baru dan field audit lain ke grid dashboard.
+
+Dampak yang dapat dinyatakan dengan tepat: UI redaction kolom tidak setara
+redaction data. Untuk audit Karyawan, service membatasi record ke user sendiri,
+namun kolom tertentu dapat terlihat melalui dashboard/export. Untuk kartu stok,
+service tidak memberi filter user karena informasi mutasi lintas operator
+memang bagian dari kartu stok, tetapi nama user yang disembunyikan pada UI
+berpotensi muncul di ekspor.
+
+8.4 Penjualan dapat dilihat lintas kasir
+SalesOperational dipanggil UI dengan userId=null bagi kedua role. Laporan
+penjualan Karyawan mencakup transaksi seluruh user dalam rentang tanggal,
+termasuk nama user, status, diskon, catatan dan rincian item. Ini dapat menjadi
+keputusan produk yang disengaja, tetapi bukan least-privilege per kasir dan
+perlu dinilai berdasarkan kebijakan apotek.
+
+8.5 Backup manual service tidak memiliki guard
+Backup UI hanya tersedia untuk Super Admin dan meneruskan _user; tetapi
+BackupDatabase bersifat public, parameter user opsional, tidak memanggil
+RequireSuper. Pemanggilan dengan null dapat membuat backup tanpa actor/audit.
+Pada desain single-user desktop, ini terutama celah konsistensi service layer.
+Jika hanya Admin yang boleh melakukan backup, guard perlu berada di service.
+
+============================================================
+9. DESAIN TABEL audit_logs
+============================================================
+Kolom dari schema Database.cs:
+- id: primary key autoincrement.
+- action: aksi bisnis/audit, NOT NULL.
+- entity, entity_id: jenis dan id objek terkait.
+- user_id: id actor; null untuk kondisi yang tak terhubung ke akun.
+- username, role: snapshot identitas saat event atau override percobaan login.
+- reason: alasan tindakan.
+- amount: nominal terkait.
+- discount: nilai diskon.
+- payment_method: TUNAI/QRIS bila relevan.
+- transaction_code: kode laporan atau referensi yang dikirim caller.
+- medicine_id, batch_no: konteks obat/batch.
+- qty_in, qty_out: kuantitas, default 0.
+- old_value, new_value: snapshot tekstual.
+- status: default BERHASIL.
+- notes: konteks tambahan.
+- created_at: waktu lokal string ISO-like dari DateTime.Now.ToString("s").
+
+Index:
+- idx_audit_created(created_at).
+- idx_audit_user(user_id, created_at).
+Tidak tampak UNIQUE constraint pada event audit, hash/checksum, trigger
+append-only, foreign key pelaku ke users, atau constraint katalog status/action.
+Role/name disalin ke baris audit agar masih terbaca walau profile berubah.
+
+AuditService.LogDetailed:
+- menerima AppUser atau override username/role;
+- menerima optional SQLiteConnection dan SQLiteTransaction;
+- membuka koneksi sendiri jika koneksi tidak diberikan;
+- menulis parameter melalui query parameterized;
+- nilai optional disimpan sebagai NULL; qty default 0;
+- status default BERHASIL;
+- menulis created_at dari jam OS pada saat dipanggil;
+- tidak melakukan validasi whitelist action/entity/status;
+- merupakan public static method, jadi caller kode aplikasi dapat meminta
+  baris audit apa pun dengan nilai yang diberikan.
+
+Waktu menggunakan jam lokal tanpa offset/timezone eksplisit dan format detik,
+bukan jam server tepercaya. Jika beberapa event terjadi pada detik yang sama,
+ID autoincrement menjadi pembeda urutan praktis. Jika jam Windows berubah,
+created_at dapat mundur/maju.
+
+============================================================
+10. KATALOG EVENT AUDIT YANG TERLIHAT DI SOURCE
+============================================================
+Nama berikut berasal dari pemanggilan source saat ini. Satu operasi dapat
+menghasilkan beberapa event; nama action yang dicari di filter UI kadang
+merupakan pola, bukan action tersendiri.
+
+10.1 Login dan sesi
+LOGIN:
+- BERHASIL setelah password valid.
+- GAGAL jika user tak ditemukan/nonaktif atau password salah.
+LOGOUT:
+- Ditulis bila sesi yang punya AppUser ditutup/ganti pengguna.
+Tidak ditemukan audit terpisah untuk kegagalan membuka aplikasi/startup.
+
+10.2 User management
+TAMBAH_AKUN, UBAH_AKUN.
+Snapshot old/new mencakup username, display name, role, aktif, permission
+stok masuk dan koreksi. Password tidak dicatat, hanya flag bahwa diubah.
+Notes umum: "Pengelolaan akun". Perubahan pembatasan account tercatat dalam
+transaksi yang sama dengan operasi user.
+
+10.3 Master obat dan batch
+TAMBAH_OBAT: snapshot sesudah; jika AWL membuat stok, stock movement STOK_AWAL.
+UBAH_OBAT: snapshot sebelum dan sesudah kode/nama/unit/stok/harga/min/category/
+supplier/status.
+AKTIFKAN_OBAT dan NONAKTIFKAN_OBAT: snapshot sebelum/sesudah, soft delete.
+KOREKSI_BATCH: batch dan expiry sebelum/sesudah, reason.
+UBAH_EXPIRED_DATE: event tambahan bila tanggal expiry benar-benar berubah.
+
+10.4 Kategori dan supplier
+TAMBAH_KATEGORI/UBAH_KATEGORI dan TAMBAH_SUPPLIER/UBAH_SUPPLIER.
+Dibuat oleh SaveCategory/SaveSupplier untuk operasi manual Admin. Pada
+implementasi ini log perubahan kategori/supplier menggunakan name sebagai
+reference/notes, old_value tidak memuat snapshot nama lama, dan new_value
+memuat status aktif; jadi rincian before/after tidak sekaya audit master obat.
+Helper EnsureCategory/EnsureSupplier dapat membuat data secara otomatis saat
+stok masuk tanpa event tambah master terpisah. Pembelian tetap tercatat pada
+event stok masuk.
+
+10.5 Penjualan
+PENJUALAN pada header transaksi: subtotal, diskon, total, payment, report code,
+nomor transaksi internal dalam notes, actor.
+PEMBERIAN_DISKON hanya bila diskon > 0.
+STOK_KELUAR per batch/porsi legacy yang dikurangi: obat, batch (bila ada),
+qty_out, stok sebelum/sesudah, payment, kode T/Q, notes.
+Stock movements paralel menggunakan movement_type KELUAR.
+
+10.6 Stok masuk
+Pada header purchase: STOK_MASUK dengan supplier, no faktur, total dan notes.
+Untuk tiap item: STOK_MASUK pada obat/batch dengan saldo lama/baru, qty, nilai.
+TAMBAH_OBAT_DARI_STOK_MASUK atau UPDATE_OBAT_DARI_STOK_MASUK menangkap
+snapshot master obat serta sinkronisasi harga/status/identitas.
+Tipe movement: MASUK. Purchase menyimpan jenis TUNGGAL/FAKTUR dan item.
+
+EDIT_STOK_MASUK ada sebagai cabang ekspresi di SavePurchaseInternal, tetapi
+UpdatePurchase saat ini selalu melempar InvalidOperationException sebelum
+cabang itu digunakan; ini bukan jalur edit yang tersedia bagi operator.
+
+10.7 Koreksi stok
+PENYESUAIAN_STOK:
+- koreksi positif: satu event untuk tambahan dengan qty_in dan batch ADJ-...
+- koreksi negatif: satu event per batch yang dikurangi dan satu tambahan bila
+  stok legacy tanpa batch turut dikurangi;
+- mencakup old/new saldo dan reason.
+Movement parallel bertipe PENYESUAIAN_MASUK atau PENYESUAIAN_KELUAR.
+
+10.8 Koreksi/batal penjualan
+Pembatalan menghasilkan:
+- STOK_MASUK untuk setiap porsi batch yang dikembalikan;
+- perubahan status sales FINAL -> DIBATALKAN;
+- PEMBATALAN_TRANSAKSI dengan total, diskon, metode, reason dan notes.
+Movement bertipe BATAL_PENJUALAN. Restorasi stok legacy mendapat batch
+RETUR-... bila mapping batch asal tidak lengkap.
+
+10.9 Stok opname
+MULAI_STOK_OPNAME: status awal DRAFT, actor, nomor opname.
+HITUNG_STOK_OPNAME: setiap penyimpanan hitungan, old physical -> physical,
+system qty, variance dan alasan yang dimasukkan.
+SELESAI_STOK_OPNAME_ITEM: per item selisih yang benar-benar diposting; item
+variance nol tidak menghasilkan event item ini.
+SELESAI_STOK_OPNAME: perubahan status header dan penyelesaian.
+BATAL_STOK_OPNAME: status sebelum/sesudah, reason.
+Mutasi stock movement STOK_OPNAME ikut dibuat untuk selisih nonzero.
+
+10.10 Database dan import
+BACKUP_DATABASE: ditulis setelah salinan DB selesai jika user tidak null.
+RESTORE_DATABASE: ditulis setelah restore dan inisialisasi berhasil pada DB
+hasil restore; backup keselamatan sebelumnya juga mempunyai event backup
+pada database aktif sebelum diganti (barisnya mengikuti keadaan snapshot).
+IMPORT_EXCEL: ringkasan berhasil/dilewati/gagal setelah loop selesai; status
+BERHASIL jika gagal=0, selain itu SELESAI_DENGAN_CATATAN.
+
+10.11 Event yang tidak tampak dicatat sebagai audit
+- Penayangan/ekspor laporan, export master, export kartu stok, print struk.
+- Pemanggilan report Activity/Audit, filter atau pembacaan dashboard.
+- Kegagalan authorization/service berupa UnauthorizedAccessException.
+- Banyak kegagalan validasi transaksi dan operasi stok.
+- Kegagalan backup/restore/import yang terjadi sebelum event sukses/ringkasan.
+- Seed obat awal, akun default yang dibuat otomatis, migrasi schema dan
+  beberapa helper pembuatan master.
+- Hasil query login tertentu hanya dicatat jika AuditService sendiri berhasil.
+Hal ini tidak otomatis berarti event tersebut harus diaudit, tetapi harus
+sesuai kebutuhan akuntabilitas yang dipilih.
+
+============================================================
+11. AUDIT DAN KONSISTENSI TRANSAKSI BISNIS
+============================================================
+Operasi yang menulis perubahan dan audit menggunakan koneksi/transaksi yang
+sama mencakup:
+- penjualan dan pengurangan stok;
+- stok masuk dan detail batch;
+- koreksi stok/batch;
+- perubahan master obat;
+- perubahan akun;
+- pembatalan transaksi;
+- stok opname.
+
+Jika transaksi gagal sebelum commit, perubahan dan event audit pendamping
+seharusnya ikut rollback. Ini memberi konsistensi antara status bisnis dan
+catatan audit untuk jalur tersebut.
+
+Pengecualian/nuansa:
+- Login gagal dicatat lewat koneksi audit terpisah karena transaksi bisnis
+  belum ada.
+- Backup menyalin database, lalu mencatat audit setelah copy; bukti tidak
+  atomik dengan file salinan.
+- Restore mengganti DB, menginisialisasi, lalu menulis RESTORE_DATABASE pada
+  DB yang sekarang aktif. Restore source dapat menggantikan histori lama.
+- Import Excel memanggil MedicineService.Save per baris, masing-masing
+  transaksi sendiri. Import dapat menyimpan sebagian baris sebelum baris lain
+  gagal. Exception per baris ditangkap dan dihitung; event IMPORT_EXCEL hanya
+  ditulis sesudah loop selesai. Jika parsing/IO gagal sebelum event akhir,
+  event summary mungkin tidak tercatat meskipun backup sebelumnya ada.
+- Event audit bukan bukti bahwa event gagal yang tidak dicatat tidak pernah
+  dicoba.
+
+============================================================
+12. LAPORAN AKTIVITAS DAN AUDIT
+============================================================
+12.1 Activity
+Menu tersedia untuk user yang login. Filter UI: rentang tanggal dan action;
+Super Admin memiliki filter username tambahan. Karyawan tidak diberi filter
+user karena service memaksa user_id miliknya.
+
+Activity service memilih field dasar termasuk waktu, username/role, action,
+transaction_code, medicine name, batch, qty, amount, discount, payment,
+reason, notes, old/new dan status. Untuk requester bukan Super Admin:
+- record dibatasi a.user_id=@uid;
+- kolom old_value/new_value tidak dimasukkan dalam hasil detail Activity;
+- UI menyembunyikan Role, Batch, Diskon, Alasan, Nilai Sebelum, Nilai Sesudah;
+- DataTable masih berisi field yang sekadar disembunyikan pada grid, sehingga
+  sebagian dapat terbawa saat export.
+
+12.2 Laporan Audit
+Tab Laporan > Audit hanya dibuat untuk Super Admin. ReportService.Audit
+memanggil RequireSuper dan mengambil baris audit per tanggal, dengan filter
+opsional user_id dan action, urut id descending. Tabel meliputi waktu, user,
+role, action, entitas, kode, batch, qty, old/new, amount, discount, payment,
+reason, notes, status. UI dapat export tabel ini.
+
+12.3 RecentActivity/dashboard
+RecentActivity membatasi baris kepada user sendiri kecuali IsSuperAdmin.
+Dashboard memakai DataGridView umum dan tidak menghilangkan field audit
+sensitif secara eksplisit. Query RecentActivity memasukkan old_value/new_value,
+batch, discount, reason dan role bahkan untuk Karyawan yang row-scope-nya
+sendiri. Ini berbeda dengan peringatan/panduan yang dapat memberi kesan semua
+kolom tersebut selalu tersembunyi bagi Karyawan.
+
+12.4 Pengelompokan Activity: risiko korelasi kritis
+Kedua query Activity dan RecentActivity membentuk grp_key sebagai:
+- transaction_code jika terisi;
+- AUDIT-<id> jika kosong.
+Mereka kemudian GROUP BY grp_key dan memilih MIN(created_at), MAX(username),
+MAX(role), GROUP_CONCAT(DISTINCT action), SUM qty, MAX amount/discount/status.
+
+Namun transaction_code transaksi penjualan adalah report_code T1/T2/... atau
+Q1/Q2/... yang nomor urutnya dimulai lagi pada report_date lain. audit_logs
+menyimpan transaction_code tetapi tidak menyimpan report_date atau transaction
+internal number sebagai key grouping khusus. Akibatnya dua transaksi berbeda
+pada hari/periode berbeda yang sama-sama berkode T1 dapat tergabung menjadi
+satu group; pada tampilan Super Admin, username/action/nominal juga bisa
+berasal dari transaksi berbeda. Pada RecentActivity yang tak memfilter tanggal,
+risiko ini berlaku lintas histori. Ini dapat merusak keterlacakan dan membuat
+ringkasan audit menyesatkan.
+
+Solusi desain yang disarankan: simpan correlation/group id yang unik dan
+immutable untuk seluruh event satu operasi bisnis (misalnya sale_id atau
+transaction_no internal) pada setiap audit row. Jangan memakai report_code
+harian sebagai satu-satunya group key. Tambahkan report_date/payment bila
+berguna untuk tampilan, tetapi pertahankan correlation id unik.
+
+============================================================
+13. TEMUAN DAN RISIKO, DIURUTKAN MENURUT PRIORITAS
+============================================================
+P0 - Korelasi Activity dapat menggabungkan transaksi berbeda
+Bukti: report_code dibuat ulang menurut report_date dan payment; query
+RecentActivity/Activity mengelompokkan dengan transaction_code saja.
+Dampak: salah menyatukan user, waktu, action, nominal dan kuantitas pada
+ringkasan. Raw Audit report tidak memakai grouping dan dapat menjadi pembanding.
+Tindakan: group dengan id transaksi/correlation id unik; tambah pengujian
+transaksi bernomor T1 pada dua tanggal dan dua user.
+
+P1 - Penyembunyian kolom tidak menghapus data sebelum export
+Bukti: ActivityPanel dan StockCardPanel mengatur DataGridViewColumn.Visible,
+kemudian ExcelBackupService.ExportTable menerima DataSource DataTable mentah.
+Dampak: sebagian field yang disembunyikan dapat ikut file Excel. Activity row
+Karyawan tetap dibatasi hanya miliknya oleh service, tetapi Role/Batch/Diskon/
+Alasan yang disembunyikan berpotensi ter-export. Kolom User kartu stok juga
+bisa ikut export.
+Tindakan: proyeksikan kolom yang diizinkan di service atau buat DataTable export
+terfilter terpisah; uji inspeksi isi xlsx, bukan hanya tampilan grid.
+
+P1 - Beberapa pembacaan sensitif hanya dibatasi UI
+Bukti: sejumlah report/read methods tidak menerima requester atau tidak
+memanggil RequireSuper; daftar eksplisit ada pada bagian 7.
+Dampak: kebijakan least privilege tidak ditegakkan konsisten di service layer.
+Karena aplikasi desktop lokal, ini bukan klaim adanya endpoint remote; risiko
+berlaku untuk jalur kode dalam aplikasi, pengembangan berikutnya dan integritas
+pola akses.
+Tindakan: masukkan AppUser ke semua service baca yang berhubungan dengan
+sensitivitas; enforce pada service, jangan percaya parameter boolean
+includeSupplier/includeInactive dari pemanggil.
+
+P1 - BackupDatabase menerima user null tanpa otorisasi
+Dampak: file DB dapat disalin tanpa actor dan tanpa event audit melalui
+pemanggilan method langsung.
+Tindakan: jika kebijakan Admin-only, RequireSuper(user) di service dan pisahkan
+API backup administratif dari backup internal migration.
+
+P1 - Audit tidak tamper-evident dan satu file dengan data bisnis
+Dampak: administrator lokal atau malware yang bisa menulis DB dapat memalsukan
+atau menghapus log; kerusakan file dapat menghilangkan operasi dan audit.
+Tindakan: batasi NTFS, backup off-device, append/export audit ke lokasi terpisah
+atau server, checksum/hash chain bila kebutuhan pembuktian menuntutnya.
+
+P2 - Sesi/permission tidak direvalidasi
+Dampak: sesi lama dapat tetap membawa role/flag sebelumnya setelah perubahan
+akun di sesi lain; service mempercayai AppUser caller.
+Tindakan: paksa relogin saat permission berubah, cabut sesi aplikasi lain,
+atau revalidasi status dan security stamp pada operasi sensitif.
+
+P2 - Percobaan/kegagalan operasi sensitif tidak lengkap diaudit
+Dampak: tidak dapat membedakan tidak pernah dicoba dari dicoba tetapi ditolak
+untuk beberapa validasi, otorisasi, I/O dan restore.
+Tindakan: tambahkan audit penolakan dengan actor/context yang aman; jangan
+mencatat password, token, atau informasi rahasia ke notes.
+
+P2 - Aktivitas keamanan sendiri tidak diaudit
+Pembukaan laporan, export, print struk, perubahan filter atau pembacaan data
+admin tidak tercatat. Jika kebutuhan apotek hanya audit mutasi, hal ini bisa
+menjadi keputusan scope; jika data sensitif perlu ditelusuri, tambahkan event
+READ/EXPORT/PRINT dengan kebijakan volume/retensi.
+
+P2 - Pencatatan kategori/supplier tidak memiliki old snapshot lengkap
+Edit manual menulis name/reference, old_value null, new_value terutama status.
+Perubahan nama lama tidak jelas dari baris audit itu sendiri. Helper creation
+pada stok masuk juga tidak membuat event supplier/category khusus.
+Tindakan: simpan snapshot old/new record untuk edit serta event pembuatan
+implicit dengan purchase correlation id.
+
+P2 - Tidak ada MFA dan rate limiting
+Password PBKDF2 tidak menghalangi percobaan berulang; tidak ada alert/lockout.
+Tindakan: ganti kredensial default, password kuat, proteksi OS; evaluasi
+throttling bertahap bila penggunaan mendukung.
+
+P2 - Waktu lokal dapat diubah
+Timestamp audit pakai DateTime.Now tanpa timezone/UTC/clock authority. AppClock
+hanya membandingkan jam dinding terhadap Stopwatch selama proses aktif dan
+menampilkan peringatan, tidak membuat timestamp tepercaya.
+Tindakan: sinkronkan jam Windows, simpan offset/UTC bila sesuai, catat perubahan
+jam dan jadikan prosedur waktu bagian kontrol operasional.
+
+P3 - Batas query Activity dan penggunaan wildcard
+Action/username memakai LIKE dengan wildcard; bukan isu utama, tetapi filter
+perlu diuji untuk action pattern, performa dan hasil grouping.
+Tindakan: sediakan filter terstruktur berdasar action enum dan paginasi bila
+volume audit membesar.
+
+============================================================
+14. CARA INVESTIGASI BERBASIS DUA LEDGER
+============================================================
+A. Selisih stok obat/batch
+1. Catat medicine, batch, jumlah fisik, tanggal/jam dan unit.
+2. Buka Kartu Stok; filter obat, rentang waktu, batch, tipe, kode.
+3. Cocokkan stock_before/stock_after, qty_in/qty_out dan batch balance.
+4. Buka Audit Admin dengan rentang tanggal yang sama.
+5. Cocokkan action PENJUALAN, STOK_MASUK, STOK_KELUAR,
+   PENYESUAIAN_STOK, PEMBATALAN_TRANSAKSI atau event opname.
+6. Cocokkan user, role, reason, notes, nominal/metode dan entity/reference id.
+7. Periksa transaksi asli/purchase atau opname, jangan hanya mengandalkan
+   ringkasan Activity karena potensi group collision report_code.
+
+B. Diskon/penjualan tidak biasa
+1. Cari sale di laporan penjualan berdasarkan report date, T/Q dan jam.
+2. Catat transaction_no internal, sale id, status dan kasir.
+3. Periksa event PENJUALAN serta PEMBERIAN_DISKON.
+4. Cocokkan subtotal, discount, total, payment dan item di sale_items.
+5. Periksa apakah transaksi FINAL atau DIBATALKAN dan event pembatalan.
+
+C. Koreksi/pembatalan
+1. Pastikan action dan actor memiliki otoritas sesuai matriks.
+2. Pastikan reason ada dan bukan sekadar catatan generik bila kebijakan
+   mengharuskan alasan faktual.
+3. Cocokkan movement stok masuk/keluar, batch dan saldo.
+4. Untuk cancel, status harus FINAL sebelumnya dan menjadi DIBATALKAN; cek
+   stok batch dikembalikan atau RETUR legacy dibuat.
+
+D. Login gagal
+1. Filter Activity Admin dengan LOGIN_GAGAL (UI menerjemahkan ke action LOGIN
+   status GAGAL) atau lihat Audit.
+2. Kelompokkan username, timestamp, status dan notes.
+3. Bedakan username tidak ada/nonaktif (role/entity id dapat kosong) dari
+   password salah (id/role diketahui).
+4. Jangan menganggap setiap percobaan akan tercatat jika audit DB sedang gagal.
+
+E. Perubahan akun
+1. Cari TAMBAH_AKUN/UBAH_AKUN.
+2. Cocokkan old_value/new_value, role, aktif, can_purchase, can_adjust_stock.
+3. Password hanya ditandai berubah; nilai rahasia seharusnya tidak masuk audit.
+4. Relogin akun terdampak untuk memuat ulang permission.
+
+F. Restore
+1. Catat file sumber, waktu, actor serta safety backup.
+2. Cari BACKUP_DATABASE dan RESTORE_DATABASE pada DB aktif hasil restore.
+3. Bandingkan safety backup dan sumber restore karena isi database lama dapat
+   diganti seluruhnya.
+4. Audit dari DB yang ditimpa tidak dijamin ikut ke DB hasil restore.
+
+Contoh query SQLite read-only untuk pemeriksaan:
+
+SELECT id, created_at, username, role, action, entity, entity_id,
+       transaction_code, medicine_id, batch_no, qty_in, qty_out,
+       old_value, new_value, amount, discount, payment_method,
+       reason, status, notes
+FROM audit_logs
+WHERE date(created_at) BETWEEN '2026-09-01' AND '2026-09-30'
+ORDER BY id DESC;
+
+SELECT id, movement_datetime, movement_type, medicine_id, batch_id,
+       transaction_code, qty_in, qty_out, stock_before, stock_after,
+       user_id, reason, note
+FROM stock_movements
+WHERE medicine_id = 1
+ORDER BY id DESC;
+
+Gunakan ID obat dan tanggal yang benar; jangan menjalankan UPDATE/DELETE saat
+investigasi produksi. Buat backup dan gunakan salinan database untuk analisis
+forensik atau eksperimen.
+
+============================================================
+15. MATRIKS UJI RBAC POSITIF/NEGATIF
+============================================================
+Hasil berikut adalah expected result; belum diklaim lulus.
+
+ID  Aktor        Uji                                  Hasil yang diharapkan
+--------------------------------------------------------------------------
+R01 Karyawan     Login password benar                Login berhasil; LOGIN BERHASIL
+R02 Karyawan     Password salah                      Ditolak; LOGIN GAGAL
+R03 Karyawan     Akun nonaktif                       Ditolak; LOGIN GAGAL
+R04 Karyawan     Ubah master obat lewat UI            Menu/tombol tidak tersedia
+R05 Karyawan     MedicineService.Save                UnauthorizedAccessException
+R06 Karyawan     MedicineService.SetActive           UnauthorizedAccessException
+R07 Karyawan     Koreksi stok, flag false             Ditolak di service
+R08 Karyawan     Koreksi stok, flag true              Diizinkan + reason + audit
+R09 Karyawan     SavePurchase, flag false             Ditolak di service
+R10 Karyawan     SavePurchase, flag true              Diizinkan + audit/movement
+R11 Karyawan     CancelSale                           UnauthorizedAccessException
+R12 Karyawan     Start/SaveCount/Complete opname      Ditolak oleh RequireSuper
+R13 Karyawan     ReportService.Audit                 Ditolak oleh RequireSuper
+R14 Karyawan     ReportService.Activity(user sendiri) Hanya row user tersebut
+R15 Karyawan     Activity dengan userId lain          Tidak dapat menentukan user lain
+R16 Karyawan     Export Activity                     Inspeksi apakah kolom tersembunyi ikut
+R17 Karyawan     Export StockCard                    Periksa kolom User tersembunyi
+R18 Karyawan     Buka Laporan Penjualan              Cek apakah transaksi user lain terlihat
+R19 Admin        Kelola akun valid                   Berhasil; audit before/after
+R20 Admin        Nonaktifkan diri sendiri             Ditolak
+R21 Admin        Hilangkan Super Admin terakhir       Ditolak
+R22 Admin        Role SUPER_ADMIN, permission false  Permission efektif tetap true
+R23 Admin        CorrectBatch tanpa reason            Ditolak
+R24 Admin        Cancel sale FINAL tanpa reason       Ditolak
+R25 Admin        Cancel sale bukan FINAL              Ditolak
+R26 Admin        Restore saat opname aktif            Ditolak
+R27 Admin        Import Excel                        Guard Admin + backup lebih dulu
+R28 Admin        BackupDatabase(null)                 Saat ini dapat dibuat tanpa actor/log
+R29 System       Memulai opname lalu transaksi stok   Mutasi lain ditolak
+R30 System       SavePurchase UpdatePurchase          Edit tersimpan tetap ditolak
+R31 Audit        Buat T1 di dua report_date           Periksa Activity grouping collision
+R32 Audit        Satu transaksi multi-batch           Penjualan + event stok per batch
+R33 Audit        Paksa exception sebelum commit        Tidak ada mutation/audit parsial transaksi
+R34 Audit        Validasi bisnis gagal                Verifikasi apakah ada audit gagal; sering tidak ada
+
+============================================================
+16. MATRIKS UJI AUDIT TRAIL
+============================================================
+Untuk setiap event uji, verifikasi dua hal terpisah:
+1. `audit_logs`: identitas, action, waktu, status, reason/nilai transaksi.
+2. Tabel bisnis/stock_movements: perubahan kuantitas/status yang benar.
+
+Skenario wajib:
+- LOGIN sukses, password salah, username tak ditemukan, akun nonaktif.
+- LOGOUT melalui ganti pengguna dan close form.
+- Tambah/edit akun, ganti role/permission/status/password.
+- Tambah/edit/nonaktifkan obat; koreksi batch dan expiry.
+- Tambah/edit kategori/supplier manual dan kreasi otomatis stok masuk.
+- Penjualan Tunai tanpa diskon; Tunai dengan diskon; QRIS; transaksi multi item.
+- Penjualan membagi qty ke beberapa batch; fallback stok legacy.
+- Stok masuk tunggal, batch/faktur banyak item, item membuat obat baru.
+- Koreksi positif, koreksi negatif lintas batch, koreksi legacy.
+- Pembatalan sale dengan batch mapping lengkap/parsial.
+- Opname start, hitung item, posting varians, batal draft, item tanpa selisih.
+- Backup sukses/gagal, restore sukses/gagal, import parsial/gagal.
+- Tampilan Activity, Audit, dashboard, dan Excel untuk kedua role.
+- Grouping transaksi report_code yang dipakai ulang pada tanggal lain.
+
+Pemeriksaan atribut per konteks:
+- Identitas: user_id, username, role; null/override pada login tak dikenal.
+- Waktu: created_at sesuai jam komputer dan urutan yang dapat dibaca.
+- Objek: entity/entity_id dan medicine/batch jika relevan.
+- Korelasi: reference/transaction code yang tidak membaur antar transaksi.
+- Dampak: qty, saldo lama/baru, amount, discount, payment method.
+- Alasan: wajib ada pada koreksi, cancel dan opname variance/cancel.
+- Status: BERHASIL/GAGAL/SELESAI_DENGAN_CATATAN sesuai skenario.
+- Konsistensi: audit dan data transaksi commit/rollback bersama bila memang
+  satu operasi bisnis.
+- Visibility/export: pemeriksaan dilakukan pada XLSX aktual, bukan hanya grid.
+
+============================================================
+17. REKOMENDASI PERBAIKAN BERURUTAN
+============================================================
+Prioritas 0 - Korelasi event dan laporan
+- Tambah correlation_id yang unik per aksi bisnis ke audit_logs.
+- Untuk sale gunakan sale id/transaction_no internal, bukan T1/Q1 saja.
+- Group Activity dengan correlation id; jangan gabungkan transaksi harian.
+- Buat test dengan kode laporan sama pada tanggal berbeda.
+
+Prioritas 1 - Enforce akses di service
+- Semua query sensitif menerima AppUser/requester dan menegakkan policy.
+- Lakukan guard pada UserService.List, supplier/category reads bila memang
+  sensitif, batch/purchase data, opname Items/Status/PostingSummary, report
+  Batches/Corrections/DiscountReport/Sales/StockIn/StockCard/Export.
+- `includeSupplier`, `includeInactive` dan username filter tidak boleh menjadi
+  parameter otorisasi yang dipercaya tanpa cek actor.
+- Pastikan BackupDatabase Admin-only atau sediakan API internal terpisah yang
+  tidak bisa dipanggil UI sebagai user biasa.
+
+Prioritas 1 - Redaksi data benar sebelum export
+- Buat proyeksi DataTable yang hanya memuat kolom berhak sebelum dikirim ke UI
+  dan export.
+- Jangan hanya menyembunyikan DataGridViewColumn.
+- Pastikan pengguna biasa tidak memperoleh kolom tersembunyi pada xlsx.
+
+Prioritas 1 - Session integrity
+- Revalidasi user aktif/role/permission untuk operasi sensitif atau paksa
+  semua sesi terkait keluar setelah perubahan akun.
+- Hindari mempercayai AppUser arbitrary; gunakan session context yang hanya
+  dibuat AuthService dan tidak dapat dimutasi caller.
+- Untuk aplikasi desktop lokal, tetap batasi akses file database dengan ACL OS.
+
+Prioritas 1 - Perlindungan dan kontinuitas audit
+- Backup otomatis berkala ke media/lokasi terpisah; verifikasi checksum dan
+  lakukan restore drill.
+- Pertimbangkan salinan audit append-only ke lokasi berbeda/terpusat.
+- Jika diperlukan bukti anti-manipulasi, gunakan signature/hash chain dengan
+  kunci di luar database; jelaskan prosedur rotasi dan pemulihan kunci.
+- Lindungi database dan backup melalui ACL Windows serta akun operator
+  terpisah.
+
+Prioritas 2 - Lengkapi event/konteks
+- Putuskan apakah export, print, audit-read, backup failure, restore failure,
+  login lockout dan authorization denial perlu dicatat.
+- Tambahkan snapshot before/after kategori/supplier dan event implicit create.
+- Tambahkan event import mulai/selesai/gagal dengan import id, row number,
+  summary dan hasil parsial tanpa menyimpan rahasia.
+- Catat migrasi/seed dengan versi dan jumlah record; hindari mengaudit nilai
+  sensitif atau password.
+
+Prioritas 2 - Autentikasi
+- Ganti credential development pada deployment.
+- Tambahkan throttling/login delay atau lockout yang tahan denial-of-service.
+- Evaluasi password policy, reset aman, dan MFA sesuai kemampuan offline.
+- Jangan menampilkan perbedaan username/password kepada operator; pertahankan
+  pesan umum tetapi audit internal menyimpan detail minim yang diperlukan.
+
+Prioritas 2 - Waktu dan retensi
+- Sinkronkan jam client; simpan timestamp UTC/offset bila sesuai dan tampilkan
+  waktu lokal untuk operator.
+- Tentukan retention, arsip, akses, media audit dan prosedur penghapusan legal.
+- Jangan menganggap Excel sebagai bukti immutable.
+
+Prioritas 3 - Proses kontrol apotek
+- Tinjau izin koreksi/stok masuk berkala dengan prinsip least privilege.
+- Gunakan akun per individu, jangan akun bersama.
+- Pemeriksaan koreksi, pembatalan, diskon dan login gagal dilakukan terjadwal.
+- Pisahkan petugas penghitung dan pemberi approval opname bila separation of
+  duties wajib; implementasikan status transition yang benar sebelum klaim
+  workflow persetujuan.
+
+============================================================
+18. KESIMPULAN IMPLEMENTASI
+============================================================
+Firdan Farma menerapkan RBAC sederhana pada aplikasi kasir/manajemen stok
+apotek: dua role dan dua permission stok, dengan menu berbeda serta guard
+service pada sejumlah jalur mutasi utama. Login menyimpan password sebagai
+hash PBKDF2-SHA256. Audit terstruktur menghubungkan sebagian besar transaksi,
+perubahan stok dan tindakan administratif ke user, waktu, action, alasan,
+referensi serta nilai yang relevan. Transaksi SQLite membantu memastikan
+mutasi/audit pendamping commit atau rollback bersama.
+
+Namun cakupan enforcement tidak seragam. Ada method pembacaan/ekspor yang
+hanya dibatasi UI, beberapa kolom audit tersembunyi tetap berada di DataTable,
+backup service tidak Admin-guard, sesi tidak direvalidasi, dan Activity dapat
+mencampur transaksi karena kode laporan dipakai ulang lintas tanggal. Audit
+juga berada di database lokal tanpa anti-tamper atau salinan pusat dan tidak
+mencatat semua kegagalan.
+
+Dengan demikian, istilah yang paling tepat untuk keadaan saat ini adalah:
+"RBAC operasional dan audit trail lokal yang berguna, dengan sebagian guard
+service-level dan beberapa kontrol baca/export yang masih UI-level; belum
+merupakan audit immutable atau sistem keamanan enterprise." Sebelum membuat
+klaim keberhasilan, jalankan matriks uji pada database testing dan catat bukti
+actual result. Jangan melakukan pengujian destructive terhadap database apotek
+produksi.
+
+============================================================
+19. PETA TRACEABILITY KE SOURCE
+============================================================
+Role, permission efektif:
+- Models/AppUser.cs
+
+Login, password dan logout:
+- Services/AuthService.cs
+- Security/PasswordHasher.cs
+- UI/LoginForm.cs
+- UI/MainForm.cs
+
+Akun dan policy user:
+- Services/UserService.cs
+- UI/AdminPanels.cs
+- Data/Database.cs (schema, default accounts, migration)
+
+Penulisan dan schema audit:
+- Services/AuditService.cs
+- Data/Database.cs (audit_logs, index, schema version 9)
+
+Master, mutasi, batch:
+- Services/MedicineService.cs
+- Services/MasterService.cs
+- UI/MedicinePanel.cs
+- UI/StockPanels.cs
+
+Penjualan, pembelian, pembatalan:
+- Services/TransactionService.cs
+- UI/SalePanel.cs
+- UI/PurchasePanel.cs
+- UI/ReportsPanel.cs
+
+Stok opname:
+- Services/StockOpnameService.cs
+- UI/StockPanels.cs
+
+Laporan/visibility/export:
+- Services/ReportService.cs
+- Services/ExcelBackupService.cs
+- UI/DashboardPanel.cs
+- UI/ReportsPanel.cs
+
+Backup dan restore:
+- Services/ExcelBackupService.cs
+- UI/AdminPanels.cs
+- Core/AppPaths.cs
+
+Kebutuhan dan acceptance yang belum otomatis terbukti:
+- PRD.md
+- MANUAL_TESTS.md
+- PANDUAN_PENGGUNAAN.md
+- RBAC_AUDIT_TRAIL_LENGKAP.txt
+
+AKHIR DOKUMEN

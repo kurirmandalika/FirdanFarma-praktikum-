@@ -1,0 +1,1464 @@
+DOKUMENTASI RBAC DAN AUDIT TRAIL
+APLIKASI APOTEK FIRDAN FARMA
+
+Versi dokumen : 1.0
+Tanggal       : 24 September 2026
+Status        : Dokumentasi perilaku implementasi saat ini
+Ruang lingkup : Role Based Access Control (RBAC), otorisasi, audit trail,
+                pelaporan aktivitas, backup/restore, dan batasan keamanan
+
+======================================================================
+0. CATATAN TRANSPARANSI
+======================================================================
+
+Dokumen ini menjelaskan perilaku yang benar-benar terdapat pada source code
+aplikasi saat dokumen dibuat. Dokumen ini bukan pernyataan bahwa aplikasi telah
+memenuhi seluruh standar audit eksternal, regulasi, atau keamanan enterprise.
+
+Apabila isi dokumen berbeda dengan perilaku aplikasi, source code dan data
+database yang sedang berjalan menjadi sumber verifikasi utama. Perubahan role,
+izin, nama action, struktur tabel, atau alur transaksi harus diikuti pembaruan
+dokumen ini.
+
+Fakta penting:
+- Aplikasi adalah desktop offline berbasis C# WinForms dan .NET Framework 4.8.
+- Database utama adalah SQLite lokal.
+- RBAC ditegakkan pada service, bukan hanya melalui menu UI.
+- Audit trail berada pada database yang sama dengan data operasional.
+- Audit belum memakai hash chain, tanda tangan digital, WORM storage, atau
+  pengiriman ke server audit terpisah.
+- Siapa pun yang memiliki akses tulis ke file database atau folder aplikasi
+  secara teknis dapat mengubah atau menghapus data di luar aplikasi.
+
+======================================================================
+1. IDENTITAS DAN LOKASI DATA
+======================================================================
+
+Jenis aplikasi : Desktop offline untuk operasional apotek
+Database      : SQLite
+Lokasi database aktif:
+  %LOCALAPPDATA%\FirdanFarma\firdan_farma.db
+
+Lokasi backup database:
+  %LOCALAPPDATA%\FirdanFarma\backup\
+
+Tabel utama terkait RBAC dan audit:
+- users
+- audit_logs
+- sales dan sale_items
+- purchases dan purchase_items
+- medicines dan medicine_batches
+- stock_movements
+- stock_opnames dan stock_opname_items
+
+Service utama:
+- AuthService       : login dan logout
+- UserService       : pengelolaan akun dan pemeriksaan Super Admin
+- AuditService      : penulisan audit_logs
+- ReportService     : laporan audit dan aktivitas
+- MedicineService   : master obat, batch, dan koreksi stok
+- TransactionService: penjualan, stok masuk, dan pembatalan transaksi
+- StockOpnameService: stok opname
+- ExcelBackupService: backup, restore, import, dan export
+
+======================================================================
+2. DEFINISI RBAC
+======================================================================
+
+RBAC adalah pengaturan akses berdasarkan role pengguna. Pada aplikasi ini,
+role disimpan di kolom users.role dan dibatasi database menjadi:
+
+1. SUPER_ADMIN
+2. KARYAWAN
+
+Selain role, akun memiliki dua permission flag:
+
+- can_purchase     : izin input stok masuk
+- can_adjust_stock : izin koreksi stok
+
+Permission efektif dihitung sebagai berikut:
+
+- SUPER_ADMIN selalu memiliki izin input stok masuk.
+- SUPER_ADMIN selalu memiliki izin koreksi stok.
+- KARYAWAN mengikuti nilai can_purchase.
+- KARYAWAN mengikuti nilai can_adjust_stock.
+- Akun nonaktif tidak dapat login sehingga tidak memperoleh sesi aplikasi.
+
+Di dalam object AppUser terdapat properti:
+- IsSuperAdmin
+- CanPurchaseEffective
+- CanAdjustStockEffective
+
+Pemeriksaan ini dipakai oleh UI dan service. Pemeriksaan pada service menjadi
+lapisan pengamanan yang mengendalikan operasi database.
+
+======================================================================
+3. AKUN DEFAULT DAN KEBIJAKAN AKUN
+======================================================================
+
+Saat inisialisasi database, aplikasi memastikan akun default berikut tersedia.
+Password di bawah adalah password awal yang ditanam pada source code dan wajib
+diganti setelah instalasi atau deployment pertama.
+
+1. Username       : alfian
+   Nama tampilan  : Alfian
+   Role           : SUPER_ADMIN
+   Password awal  : alfian
+   Stok masuk     : Ya
+   Koreksi stok   : Ya
+
+2. Username       : apotek01
+   Nama tampilan  : Apotek 01
+   Role           : KARYAWAN
+   Password awal  : apotek01
+   Stok masuk     : Ya
+   Koreksi stok   : Tidak
+
+Alias akun lama seperti admin1, admin, dan karyawan dapat dimigrasikan oleh
+inisialisasi ke akun default yang baru apabila ditemukan.
+
+Aturan pengelolaan akun:
+- Hanya SUPER_ADMIN yang dapat menambah atau mengubah akun.
+- Username minimal 3 karakter.
+- Nama tampilan wajib diisi.
+- Role hanya KARYAWAN atau SUPER_ADMIN.
+- Password akun baru wajib diisi dan minimal 6 karakter.
+- Password baru pada akun lama, bila diisi, minimal 6 karakter.
+- Username harus unik.
+- Akun yang sedang digunakan tidak boleh dinonaktifkan oleh dirinya sendiri.
+- Role akun yang sedang digunakan tidak boleh diturunkan dari SUPER_ADMIN ke
+  KARYAWAN selama sesi aktif.
+- Sistem menjaga minimal ada satu SUPER_ADMIN aktif.
+- SUPER_ADMIN otomatis memperoleh kedua permission flag.
+
+Password tidak disimpan sebagai plaintext. PasswordHasher memakai:
+- PBKDF2-SHA256
+- salt acak 16 byte
+- hash 32 byte
+- 120000 iterasi
+- perbandingan hasil hash dengan metode fixed-time
+
+Catatan: tidak ada kebijakan kompleksitas password selain panjang minimal,
+tidak ada MFA, dan tidak ada rate limiting login pada implementasi saat ini.
+
+======================================================================
+4. MATRIKS HAK AKSES
+======================================================================
+
+Fitur                                KARYAWAN       SUPER_ADMIN
+------------------------------------------------------------------
+Login akun aktif                      Ya             Ya
+Logout                                Ya             Ya
+Beranda/dashboard                     Ya             Ya
+Melihat obat aktif                    Ya             Ya
+Mengubah master obat                  Tidak          Ya
+Aktif/nonaktifkan obat                Tidak          Ya
+Melihat penjualan                     Ya             Ya
+Membuat penjualan                     Ya             Ya
+Memberi diskon saat penjualan         Ya             Ya
+Input stok masuk                      Jika izin Ya   Ya
+Edit stok masuk tersimpan             Tidak          Ditolak permanen*
+Koreksi stok                          Jika izin Ya   Ya
+Koreksi batch dan expired date        Tidak          Ya
+Melihat kartu stok                    Ya             Ya
+Melihat aktivitas sendiri             Ya             Ya
+Melihat aktivitas semua user          Tidak          Ya
+Melihat detail sebelum/sesudah audit  Tidak          Ya
+Melihat laporan audit                 Tidak          Ya
+Melihat laporan koreksi               Tidak          Ya
+Melihat laporan diskon                Tidak          Ya
+Melihat laporan batch                 Tidak          Ya
+Membatalkan transaksi                 Tidak          Ya
+Memulai stok opname                   Tidak          Ya
+Menghitung item stok opname           Tidak          Ya
+Posting stok opname                   Tidak          Ya
+Membatalkan stok opname               Tidak          Ya
+Kelola user                            Tidak          Ya
+Kelola kategori/supplier              Tidak          Ya
+Backup database                       Tidak          Ya
+Restore database                      Tidak          Ya
+Import obat dari Excel                Tidak          Ya
+Export laporan                        Sesuai laporan Ya
+
+* UpdatePurchase secara eksplisit melempar error bahwa histori stok masuk
+  tidak boleh diedit. Koreksi harus dilakukan melalui mekanisme koreksi atau
+  pembetulan yang meninggalkan histori.
+
+======================================================================
+5. CARA OTORISASI DITEGAKKAN
+======================================================================
+
+Lapisan 1 - UI:
+- Menu yang tidak relevan tidak ditambahkan ke sidebar.
+- Tab laporan sensitif hanya ditambahkan untuk SUPER_ADMIN.
+- Kolom aktivitas tertentu disembunyikan dari KARYAWAN.
+- Tombol pembatalan transaksi hanya tersedia pada laporan gabungan untuk
+  SUPER_ADMIN.
+
+Lapisan 2 - service:
+- UserService.RequireSuper memeriksa user tidak null dan IsSuperAdmin.
+- Operasi stok masuk memeriksa CanPurchaseEffective.
+- Operasi koreksi stok memeriksa CanAdjustStockEffective.
+- Operasi penjualan hanya membutuhkan sesi user yang valid.
+- ReportService.Audit hanya dapat dipanggil SUPER_ADMIN.
+- ReportService.Activity membatasi KARYAWAN ke audit milik user tersebut.
+
+Lapisan 3 - database/transaksi:
+- Data user memiliki CHECK role hanya untuk dua role yang dikenal.
+- Foreign key aktif pada koneksi SQLite.
+- Operasi penting menggunakan transaksi SQLite.
+- Audit penting ditulis dengan koneksi dan transaksi yang sama dengan operasi
+  bisnisnya.
+
+Penting: pembatasan aplikasi berlaku ketika database diakses melalui aplikasi.
+SQLite tidak menjadi boundary keamanan terhadap administrator file system.
+
+======================================================================
+6. SIKLUS LOGIN DAN SESI
+======================================================================
+
+Alur login:
+1. Username di-trim.
+2. User dicari di tabel users.
+3. Sistem menolak akun yang tidak ditemukan atau is_active bukan 1.
+4. Password diverifikasi terhadap password_hash.
+5. AppUser dibuat dengan role dan permission efektif.
+6. Audit LOGIN dibuat.
+7. Jika gagal, status audit adalah GAGAL.
+8. Jika berhasil, status audit adalah BERHASIL.
+
+Kondisi LOGIN gagal yang dicatat:
+- username tidak ditemukan;
+- akun nonaktif;
+- password salah.
+
+Saat form utama ditutup atau pengguna memilih Ganti Pengguna, aplikasi mencatat
+LOGOUT untuk user yang sedang aktif.
+
+Kolom audit login gagal dapat memakai usernameOverride dan roleOverride karena
+belum tentu tersedia object AppUser yang berhasil login.
+
+======================================================================
+7. STRUKTUR TABEL audit_logs
+======================================================================
+
+Kolom                  Arti
+------------------------------------------------------------------
+id                     ID audit autoincrement
+action                 Nama aksi, misalnya LOGIN atau PENJUALAN
+entity                 Jenis entitas, misalnya user, sale, medicine
+entity_id              ID entitas yang terdampak bila ada
+user_id                ID user pelaku bila diketahui
+username               Username pelaku atau username percobaan login
+role                   Role pelaku atau role dari record login
+reason                 Alasan koreksi, pembatalan, atau tindakan sensitif
+amount                 Nominal transaksi atau nilai terkait
+discount               Nilai diskon bila relevan
+payment_method         Metode pembayaran, misalnya TUNAI atau QRIS
+transaction_code       Kode laporan atau kode referensi transaksi
+medicine_id            ID obat yang terdampak
+batch_no               Nomor batch yang terdampak
+qty_in                 Jumlah stok masuk
+qty_out                Jumlah stok keluar
+old_value              Representasi nilai sebelum perubahan
+new_value              Representasi nilai setelah perubahan
+status                 BERHASIL, GAGAL, atau status proses lain
+notes                  Catatan tambahan
+created_at             Waktu pencatatan dari DateTime.Now dengan format s
+
+Index yang tersedia:
+- idx_audit_created pada created_at
+- idx_audit_user pada user_id dan created_at
+
+AuditService.LogDetailed menyediakan parameter koneksi dan transaksi opsional.
+Jika koneksi tidak dikirim, service membuka koneksi sendiri. Jika koneksi dan
+transaksi diberikan, audit ditulis dalam transaksi pemanggil.
+
+======================================================================
+8. KATALOG ACTION AUDIT
+======================================================================
+
+Autentikasi dan akun:
+- LOGIN
+- LOGOUT
+- TAMBAH_AKUN
+- UBAH_AKUN
+
+Master obat, batch, kategori, dan supplier:
+- TAMBAH_OBAT
+- UBAH_OBAT
+- AKTIFKAN_OBAT
+- NONAKTIFKAN_OBAT
+- KOREKSI_BATCH
+- UBAH_EXPIRED_DATE
+- TAMBAH_OBAT_DARI_STOK_MASUK
+- UPDATE_OBAT_DARI_STOK_MASUK
+- TAMBAH_KATEGORI
+- UBAH_KATEGORI
+- TAMBAH_SUPPLIER
+- UBAH_SUPPLIER
+
+Penjualan dan stok:
+- PENJUALAN
+- PEMBERIAN_DISKON
+- STOK_KELUAR
+- STOK_MASUK
+- PENYESUAIAN_STOK
+- PEMBATALAN_TRANSAKSI
+
+Stok opname:
+- MULAI_STOK_OPNAME
+- HITUNG_STOK_OPNAME
+- SELESAI_STOK_OPNAME_ITEM
+- SELESAI_STOK_OPNAME
+- BATAL_STOK_OPNAME
+
+Database dan import:
+- BACKUP_DATABASE
+- RESTORE_DATABASE
+- IMPORT_EXCEL
+
+Catatan katalog:
+- Beberapa action berasal dari satu operasi bisnis yang menghasilkan beberapa
+  baris audit.
+- Penjualan dapat menghasilkan PENJUALAN, PEMBERIAN_DISKON, dan beberapa
+  STOK_KELUAR.
+- Stok masuk dapat menghasilkan STOK_MASUK pada level purchase dan level
+  obat/batch, serta action sinkronisasi master obat.
+- Nama filter UI seperti PENYESUAIAN atau PEMBATALAN adalah pencarian pola,
+  bukan selalu nama action lengkap.
+
+======================================================================
+9. PERISTIWA YANG DIAUDIT SECARA RINCI
+======================================================================
+
+9.1 Penjualan
+- User dan role.
+- ID sale, nomor transaksi, dan report code.
+- Subtotal, diskon, total, dan metode pembayaran.
+- Obat dan batch yang keluar.
+- Stok sebelum dan sesudah.
+- Qty keluar.
+- Catatan transaksi bila relevan.
+
+9.2 Stok masuk
+- User dan role.
+- Nomor pembelian dan supplier.
+- Nomor faktur supplier.
+- Total pembelian.
+- Obat, batch, expired date, dan qty masuk.
+- Stok sebelum dan sesudah.
+- Snapshot atau perubahan master obat.
+
+9.3 Koreksi stok
+- User dan role.
+- Obat dan batch.
+- Stok sebelum dan sesudah.
+- Qty masuk atau keluar.
+- Alasan wajib.
+- Stock movement pendamping.
+
+9.4 Pembatalan transaksi
+- Hanya SUPER_ADMIN.
+- Hanya transaksi status FINAL.
+- Alasan wajib.
+- Status berubah menjadi DIBATALKAN.
+- Stok dikembalikan melalui movement BATAL_PENJUALAN.
+- Audit PEMBATALAN_TRANSAKSI dibuat.
+
+9.5 Perubahan master obat
+- Snapshot sebelum dan sesudah berisi kode, nama, satuan, AWL, MSK, KLR,
+  harga beli, harga jual, stok minimal, kategori, supplier, dan status aktif.
+
+9.6 Perubahan akun
+- Snapshot sebelum dan nilai sesudah.
+- Username, nama tampilan, role, status aktif, izin stok masuk, izin koreksi.
+- Password tidak ditulis ke audit; hanya teks password=diubah bila password
+  diganti.
+
+9.7 Stok opname
+- Pembukaan sesi.
+- Pengisian stok fisik per item.
+- Selisih yang diposting.
+- Penyelesaian atau pembatalan sesi.
+- Alasan untuk selisih dan pembatalan.
+
+9.8 Backup dan restore
+- Nama file backup atau restore.
+- Path sumber/tujuan yang diteruskan ke audit.
+- Alasan operasi.
+- Restore membuat backup keselamatan sebelum database diganti.
+
+======================================================================
+10. KONSISTENSI TRANSAKSI DAN HISTORI
+======================================================================
+
+Operasi berikut menulis perubahan bisnis dan audit dalam transaksi yang sama:
+- penjualan;
+- stok masuk;
+- koreksi stok;
+- perubahan master obat;
+- perubahan batch/expired;
+- perubahan akun;
+- pembatalan penjualan;
+- stok opname.
+
+Konsekuensi:
+- Jika transaksi bisnis gagal dan rollback terjadi, audit yang berada dalam
+  transaksi tersebut ikut tidak tersimpan.
+- Audit mencatat keberhasilan operasi yang sudah commit, bukan seluruh
+  percobaan internal yang gagal di tengah proses.
+- Login gagal dicatat sebagai operasi terpisah karena belum ada transaksi
+  bisnis yang berhasil.
+
+Stock movement dan audit berbeda fungsi:
+- stock_movements adalah ledger operasional perubahan kuantitas stok;
+- audit_logs adalah ledger pengawasan aksi, pelaku, alasan, dan perubahan.
+
+Keduanya sebaiknya dipakai bersama saat investigasi stok.
+
+======================================================================
+11. AKSES LAPORAN AUDIT DAN AKTIVITAS
+======================================================================
+
+Menu Aktivitas tersedia untuk semua user yang berhasil login.
+
+KARYAWAN:
+- hanya melihat audit dengan a.user_id sama dengan ID dirinya;
+- tidak mendapatkan filter User;
+- kolom Role, Batch, Diskon, Alasan, Nilai Sebelum, dan Nilai Sesudah
+  disembunyikan pada tampilan aktivitas;
+- tidak dapat membuka laporan audit rinci melalui ReportService.Audit.
+
+SUPER_ADMIN:
+- dapat melihat aktivitas semua user;
+- dapat memakai filter tanggal, action, dan username;
+- dapat melihat kolom role, batch, diskon, alasan, nilai sebelum, dan nilai
+  sesudah;
+- dapat membuka tab Laporan > Audit;
+- dapat memfilter laporan audit berdasarkan tanggal, user ID, dan action.
+
+Aktivitas dikelompokkan berdasarkan transaction_code. Jika tidak ada kode
+transaksi, baris audit memakai grup sintetis AUDIT-<id>. Akibat grouping,
+beberapa event yang berkaitan dapat tampil sebagai satu baris ringkasan dengan
+action yang digabung menggunakan tanda +.
+
+======================================================================
+12. ALUR INVESTIGASI AUDIT YANG DISARANKAN
+======================================================================
+
+Kasus A - Selisih stok obat:
+1. Buka Kartu Stok untuk obat terkait.
+2. Filter periode, batch, kode, dan user bila diperlukan.
+3. Cocokkan stock_before dan stock_after pada stock_movements.
+4. Cari audit action STOK_MASUK, STOK_KELUAR, PENYESUAIAN_STOK,
+   PEMBATALAN_TRANSAKSI, atau action stok opname.
+5. Periksa reason, notes, batch, dan transaction_code.
+6. Cocokkan dengan transaksi penjualan atau pembelian.
+
+Kasus B - Diskon tidak biasa:
+1. Buka laporan Diskon atau Aktivitas.
+2. Cari PEMBERIAN_DISKON dan kode transaksi.
+3. Cocokkan subtotal, diskon, total, user, metode pembayaran, dan catatan.
+4. Pastikan status penjualan masih FINAL atau sudah DIBATALKAN.
+
+Kasus C - Login mencurigakan:
+1. Buka Aktivitas sebagai SUPER_ADMIN.
+2. Filter action LOGIN_GAGAL atau periksa LOGIN berstatus GAGAL.
+3. Filter username dan rentang waktu.
+4. Cocokkan waktu dengan aktivitas LOGIN berhasil dan LOGOUT.
+5. Nonaktifkan akun atau ganti password bila diperlukan.
+
+Kasus D - Perubahan akun:
+1. Cari action TAMBAH_AKUN atau UBAH_AKUN.
+2. Baca Nilai Sebelum dan Nilai Sesudah.
+3. Periksa perubahan role, status, izin stok masuk, dan izin koreksi.
+4. Pastikan alasan pengelolaan dan user pelaku sesuai kewenangan.
+
+Kasus E - Restore database:
+1. Cari BACKUP_DATABASE sebelum restore.
+2. Cari RESTORE_DATABASE pada waktu yang sama.
+3. Periksa nama file sumber, safety backup, user, dan notes.
+4. Bandingkan data setelah restore dengan backup yang menjadi sumber.
+
+======================================================================
+13. KONTROL INTEGRITAS OPERASIONAL
+======================================================================
+
+Kontrol yang tersedia:
+- transaksi penjualan memakai status FINAL atau DIBATALKAN;
+- transaksi yang dibatalkan tidak dihapus, tetapi status diubah dan stok
+  dikembalikan;
+- histori stok masuk tidak dihapus atau dibalik untuk edit;
+- koreksi stok memerlukan alasan;
+- pembatalan transaksi memerlukan alasan;
+- selisih stok opname memerlukan alasan;
+- stok negatif ditolak;
+- expired batch tidak dijual;
+- stok opname aktif menahan transaksi stok tertentu;
+- nomor faktur supplier duplikat ditolak;
+- minimal satu SUPER_ADMIN aktif dipertahankan;
+- backup keselamatan dibuat sebelum restore;
+- foreign key SQLite dan beberapa CHECK constraint digunakan.
+
+======================================================================
+14. BATASAN DAN RISIKO YANG HARUS DIKETAHUI
+======================================================================
+
+14.1 Audit lokal belum tamper-evident
+Audit tersimpan di SQLite lokal tanpa hash berantai atau tanda tangan digital.
+Operator yang memiliki akses file system atau tool SQLite dapat mengubah data
+tanpa menghasilkan audit baru.
+
+14.2 Tidak ada audit terpusat
+Tidak ada pengiriman log ke server, SIEM, syslog, atau penyimpanan read-only.
+Kehilangan atau kerusakan file database dapat menghilangkan audit dan data
+operasional sekaligus, kecuali backup yang sehat tersedia.
+
+14.3 Tidak ada MFA dan rate limiting
+Keamanan login masih bergantung pada username, password hash, dan keamanan OS.
+Percobaan login berulang tidak dibatasi oleh mekanisme rate limit yang terlihat
+di source code.
+
+14.4 Waktu berasal dari komputer lokal
+created_at memakai DateTime.Now. Perubahan jam Windows dapat memengaruhi urutan
+waktu audit dan pelaporan. AppClock dapat memperingatkan kondisi jam, tetapi
+audit tetap memakai waktu lokal.
+
+14.5 Audit tidak otomatis mencatat semua kegagalan validasi
+Sebagian exception validasi dilempar tanpa AuditService.LogDetailed. Karena itu
+audit GAGAL paling konsisten untuk login gagal; tidak semua kegagalan operasi
+bisnis tercatat sebagai baris audit.
+
+14.6 Restore dapat mengganti histori aktif
+Restore adalah penggantian isi database dari backup. Audit restore dicatat
+setelah operasi berhasil pada database hasil restore. Audit dari database lama
+tidak otomatis tetap berada di database hasil restore apabila backup sumber
+memang tidak memuatnya. Safety backup menjadi sumber pembanding penting.
+
+14.7 Backup database tidak otomatis berarti backup off-device
+Backup default berada di folder lokal yang sama pada profil pengguna. Untuk
+perlindungan terhadap kerusakan disk, ransomware, atau kehilangan komputer,
+backup perlu disalin secara aman ke media atau lokasi terpisah.
+
+14.8 Export Excel bukan audit immutable
+Export menghasilkan salinan laporan yang dapat diubah di luar aplikasi. File
+export harus diperlakukan sebagai salinan laporan, bukan sumber kebenaran
+database.
+
+======================================================================
+15. REKOMENDASI PENGUATAN KEAMANAN
+======================================================================
+
+Prioritas tinggi:
+1. Ganti password default pada deployment pertama.
+2. Batasi NTFS permission folder database hanya untuk akun Windows yang perlu.
+3. Buat backup berkala ke lokasi berbeda dan lakukan uji restore.
+4. Simpan salinan audit berkala pada media read-only atau server terpisah.
+5. Tambahkan hash chain atau signature pada audit bila dibutuhkan bukti
+   tamper-evident.
+6. Tambahkan audit untuk kegagalan operasi sensitif yang saat ini hanya menjadi
+   exception.
+
+Prioritas menengah:
+1. Tambahkan rate limiting atau lockout bertahap untuk login gagal.
+2. Tambahkan MFA bila lingkungan operasional mendukungnya.
+3. Gunakan sumber waktu yang lebih tepercaya atau catat perubahan jam.
+4. Tambahkan retention policy, arsip, dan prosedur pemusnahan yang disetujui.
+5. Pisahkan hak melihat audit dari hak melakukan restore jika role berkembang.
+6. Tambahkan checksum pada file backup dan manifest waktu backup.
+
+======================================================================
+16. CHECKLIST OPERASIONAL HARIAN
+======================================================================
+
+Awal penggunaan:
+[ ] Password akun default sudah diganti.
+[ ] Hanya user yang diperlukan yang dibuat.
+[ ] Permission stok masuk dan koreksi sudah ditinjau.
+[ ] Backup terakhir tersedia dan dapat dibaca.
+
+Selama operasional:
+[ ] Setiap koreksi memiliki alasan.
+[ ] Setiap pembatalan memiliki alasan.
+[ ] Selisih opname memiliki alasan.
+[ ] Nomor faktur supplier diverifikasi.
+[ ] Stok negatif dan batch expired tidak dipaksakan.
+
+Akhir operasional:
+[ ] Laporan penjualan dan diskon diperiksa.
+[ ] Laporan koreksi diperiksa oleh SUPER_ADMIN.
+[ ] Aktivitas login gagal diperiksa bila ada indikasi anomali.
+[ ] Backup dibuat sesuai jadwal.
+[ ] Backup disalin ke lokasi terpisah bila kebijakan mengharuskan.
+
+======================================================================
+17. SKENARIO UJI RBAC DAN AUDIT
+======================================================================
+
+Uji 1 - Login gagal:
+- Masukkan password salah.
+- Harapkan login ditolak.
+- Harapkan satu audit LOGIN dengan status GAGAL.
+
+Uji 2 - KARYAWAN membuat penjualan:
+- Login sebagai KARYAWAN.
+- Buat penjualan tanpa atau dengan diskon.
+- Harapkan PENJUALAN dan STOK_KELUAR.
+- Jika ada diskon, harapkan PEMBERIAN_DISKON.
+
+Uji 3 - KARYAWAN tanpa izin koreksi:
+- Pastikan can_adjust_stock=0.
+- Coba akses koreksi stok melalui service atau UI.
+- Harapkan UnauthorizedAccessException.
+
+Uji 4 - KARYAWAN dengan izin koreksi:
+- Berikan can_adjust_stock=1 melalui pengelolaan SUPER_ADMIN.
+- Login ulang agar AppUser memuat permission terbaru.
+- Koreksi stok dengan alasan.
+- Harapkan PENYESUAIAN_STOK dan stock movement.
+
+Uji 5 - Pembatalan transaksi:
+- Login sebagai SUPER_ADMIN.
+- Batalkan transaksi FINAL dengan alasan.
+- Harapkan status DIBATALKAN, stok kembali, dan PEMBATALAN_TRANSAKSI.
+
+Uji 6 - Pencegahan penghapusan histori stok masuk:
+- Coba edit stok masuk tersimpan.
+- Harapkan operasi ditolak dengan pesan histori tidak boleh dibalik.
+
+Uji 7 - Stok opname:
+- Mulai opname sebagai SUPER_ADMIN.
+- Isi hitungan fisik dan alasan selisih.
+- Selesaikan opname.
+- Harapkan action mulai, hitung, item selesai, dan opname selesai.
+
+Uji 8 - Audit visibility:
+- Login sebagai KARYAWAN dan lihat Aktivitas.
+- Harapkan hanya aktivitas user tersebut dan kolom sensitif disembunyikan.
+- Login sebagai SUPER_ADMIN.
+- Harapkan audit semua user dan laporan audit tersedia.
+
+Uji 9 - Restore:
+- Buat backup.
+- Restore sebagai SUPER_ADMIN.
+- Harapkan backup keselamatan sebelum restore dan audit restore setelah sukses.
+
+======================================================================
+18. TRACEABILITY KE SOURCE CODE
+======================================================================
+
+RBAC model:
+- Models/AppUser.cs
+
+Login dan logout:
+- Services/AuthService.cs
+- UI/LoginForm.cs
+- UI/MainForm.cs
+
+Pengelolaan user:
+- Services/UserService.cs
+- UI/AdminPanels.cs
+
+Audit writer:
+- Services/AuditService.cs
+
+Laporan audit dan aktivitas:
+- Services/ReportService.cs
+- UI/ReportsPanel.cs
+
+Transaksi, stok, dan pembatalan:
+- Services/TransactionService.cs
+- Services/MedicineService.cs
+
+Stok opname:
+- Services/StockOpnameService.cs
+- UI/StockPanels.cs
+
+Backup, restore, dan import:
+- Services/ExcelBackupService.cs
+
+Skema database, default account, index audit, dan migrasi:
+- Data/Database.cs
+
+Lokasi database dan backup:
+- Core/AppPaths.cs
+
+Hash password:
+- Security/PasswordHasher.cs
+
+======================================================================
+19. KESIMPULAN
+======================================================================
+
+Implementasi saat ini memiliki RBAC praktis dengan dua role dan dua izin
+operasional tambahan. Operasi sensitif utama dilindungi di service, bukan hanya
+di UI. Audit trail cukup kaya untuk menelusuri pelaku, waktu, aksi, entitas,
+stok, nominal, alasan, dan nilai sebelum/sesudah pada banyak perubahan penting.
+
+Kekuatan utama:
+- pemisahan Super Admin dan Karyawan;
+- permission stok masuk dan koreksi yang dapat dikonfigurasi;
+- pencatatan login berhasil dan gagal;
+- audit dalam transaksi untuk banyak operasi bisnis;
+- histori stok dan transaksi tidak dihapus diam-diam;
+- laporan aktivitas dan audit berdasarkan role;
+- backup keselamatan sebelum restore.
+
+Batas utama:
+- database dan audit masih lokal;
+- belum ada anti-tamper cryptographic;
+- belum ada audit terpusat;
+- belum ada MFA/rate limiting;
+- tidak semua exception bisnis menjadi audit GAGAL;
+- backup lokal perlu perlindungan tambahan.
+
+Dokumen ini harus dibaca bersama prosedur backup, kebijakan password, kontrol
+akses Windows, dan prosedur pemeriksaan stok internal apotek.
+
+======================================================================
+AKHIR DOKUMENTASI TEKNIS
+======================================================================
+
+
+======================================================================
+20. BAGIAN KHUSUS BAHAN RISET SKRIPSI
+======================================================================
+
+Bagian ini menyusun dokumentasi teknis menjadi bahan penelitian. Isinya dapat
+dipakai sebagai dasar penyusunan proposal, skripsi, laporan analisis sistem,
+atau evaluasi keamanan aplikasi. Bahasa pada bagian ini membedakan:
+
+- fakta implementasi: temuan yang dapat diverifikasi dari source code,
+  database, dan pengujian aplikasi;
+- konsep teori: prinsip umum RBAC, audit trail, keamanan, dan pengujian;
+- rekomendasi: kondisi yang disarankan tetapi belum tentu sudah diterapkan.
+
+Peneliti harus menghindari kalimat yang menyatakan suatu rekomendasi sebagai
+fitur yang sudah berjalan.
+
+======================================================================
+21. USUL JUDUL PENELITIAN
+======================================================================
+
+Beberapa alternatif judul yang sesuai dengan objek ini:
+
+1. Analisis Implementasi Role Based Access Control dan Audit Trail pada
+  Aplikasi Manajemen Apotek Firdan Farma Berbasis Desktop.
+
+2. Evaluasi Keamanan Akses Pengguna dan Ketertelusuran Aktivitas pada Sistem
+  Informasi Apotek Menggunakan RBAC dan Audit Trail.
+
+3. Perancangan dan Implementasi Role Based Access Control serta Audit Trail
+  untuk Meningkatkan Pengawasan Operasional pada Aplikasi Apotek Offline.
+
+4. Analisis Efektivitas Pembatasan Hak Akses dan Pencatatan Aktivitas Pengguna
+  pada Aplikasi Apotek Berbasis C# dan SQLite.
+
+5. Evaluasi Implementasi Access Control dan Audit Log pada Sistem Informasi
+  Persediaan serta Penjualan Obat.
+
+Judul nomor 1 atau 2 paling tepat bila penelitian berfokus pada analisis
+implementasi yang sudah ada. Judul nomor 3 lebih tepat bila penelitian juga
+membahas proses pengembangan atau perancangan solusi.
+
+======================================================================
+22. LATAR BELAKANG PENELITIAN
+======================================================================
+
+Operasional apotek mengelola data yang bersifat penting, antara lain data
+obat, stok, batch, tanggal kedaluwarsa, transaksi penjualan, pembelian, harga,
+diskon, dan pengguna aplikasi. Kesalahan atau perubahan tanpa kewenangan pada
+data tersebut dapat menyebabkan selisih stok, kesalahan laporan, kesulitan
+menelusuri sumber masalah, dan berkurangnya akuntabilitas petugas.
+
+Pada aplikasi yang digunakan bersama, seluruh pengguna tidak seharusnya
+memiliki hak akses yang sama. Karyawan membutuhkan akses untuk menjalankan
+penjualan dan pekerjaan operasional, sedangkan Super Admin membutuhkan akses
+tambahan untuk mengelola akun, master data, koreksi, pembatalan, audit, backup,
+dan restore. Pemisahan ini merupakan penerapan prinsip least privilege, yaitu
+setiap pengguna memperoleh hak minimum yang diperlukan untuk pekerjaannya.
+
+Pembatasan menu saja belum cukup. Pengguna yang tidak berwenang harus ditolak
+juga ketika operasi dipanggil melalui lapisan service. Selain itu, pembatasan
+akses perlu dilengkapi audit trail agar sistem dapat menjawab siapa melakukan
+apa, kapan dilakukan, terhadap data apa, dengan alasan apa, dan bagaimana nilai
+data berubah.
+
+Objek penelitian ini adalah aplikasi desktop Firdan Farma yang berjalan offline
+dengan C# WinForms, .NET Framework 4.8, dan SQLite. Penelitian memeriksa dua
+aspek utama: penerapan RBAC untuk membatasi akses dan audit trail untuk
+mendukung akuntabilitas serta investigasi aktivitas operasional.
+
+======================================================================
+23. IDENTIFIKASI MASALAH
+======================================================================
+
+Masalah yang dapat dirumuskan dari objek penelitian:
+
+1. Bagaimana role dan permission pengguna didefinisikan dalam aplikasi?
+2. Bagaimana sistem membedakan hak akses KARYAWAN dan SUPER_ADMIN?
+3. Apakah otorisasi hanya diterapkan pada antarmuka atau juga pada service?
+4. Aktivitas apa saja yang dicatat oleh audit trail?
+5. Apakah audit memuat identitas pelaku, waktu, objek, perubahan, alasan,
+  status, dan referensi transaksi?
+6. Bagaimana audit digunakan untuk menelusuri penjualan, koreksi, pembatalan,
+  perubahan akun, dan stok opname?
+7. Sejauh mana audit dan RBAC mendukung pengendalian internal aplikasi?
+8. Apa batasan keamanan dari audit yang disimpan pada database SQLite lokal?
+
+======================================================================
+24. RUMUSAN MASALAH
+======================================================================
+
+Contoh rumusan masalah utama:
+
+"Bagaimana implementasi Role Based Access Control dan audit trail pada aplikasi
+Apotek Firdan Farma dalam membatasi hak akses pengguna, mencatat aktivitas
+operasional, dan mendukung proses penelusuran perubahan data?"
+
+Rumusan masalah turunan:
+
+1. Bagaimana struktur role, permission, dan aturan otorisasi pada aplikasi?
+2. Bagaimana alur pencatatan audit dari login sampai transaksi bisnis?
+3. Bagaimana hasil pengujian akses untuk setiap role?
+4. Bagaimana kelengkapan informasi audit untuk kebutuhan penelusuran?
+5. Apa kelemahan dan rekomendasi penguatan keamanan yang dapat diberikan?
+
+======================================================================
+25. TUJUAN PENELITIAN
+======================================================================
+
+Tujuan umum:
+
+Menganalisis implementasi RBAC dan audit trail pada aplikasi Apotek Firdan
+Farma untuk mengetahui kemampuan sistem dalam membatasi akses dan menyediakan
+jejak aktivitas yang dapat ditelusuri.
+
+Tujuan khusus:
+
+1. Mengidentifikasi role dan permission yang tersedia.
+2. Memetakan fitur aplikasi terhadap role pengguna.
+3. Menganalisis enforcement otorisasi pada UI dan service.
+4. Mengidentifikasi struktur dan atribut audit trail.
+5. Menguji pencatatan login, transaksi, stok, koreksi, pembatalan, akun, dan
+  backup/restore.
+6. Mengukur kelengkapan dan keterlacakan informasi audit.
+7. Mengidentifikasi risiko yang belum ditangani implementasi saat ini.
+8. Menyusun rekomendasi pengembangan berdasarkan temuan penelitian.
+
+======================================================================
+26. MANFAAT PENELITIAN
+======================================================================
+
+Manfaat akademik:
+- menjadi contoh penerapan RBAC pada aplikasi desktop offline;
+- memperjelas hubungan antara kontrol akses dan audit trail;
+- menjadi referensi analisis keamanan pada sistem informasi apotek;
+- menyediakan pemetaan antara teori dan implementasi source code.
+
+Manfaat praktis:
+- membantu pengelola memahami batas akses tiap user;
+- membantu menemukan sumber selisih stok atau perubahan transaksi;
+- membantu menentukan prioritas penguatan keamanan;
+- menyediakan checklist pengujian untuk deployment dan operasional.
+
+======================================================================
+27. BATASAN PENELITIAN
+======================================================================
+
+Agar penelitian terukur, ruang lingkup dapat dibatasi sebagai berikut:
+
+1. Penelitian berfokus pada modul login, user management, penjualan, stok
+  masuk, koreksi stok, stok opname, laporan, audit, backup, dan restore.
+2. Penelitian membahas RBAC dan audit trail, bukan seluruh kualitas aplikasi.
+3. Penelitian dilakukan pada source code dan database SQLite yang tersedia.
+4. Pengujian dilakukan pada dua role yang tersedia: KARYAWAN dan SUPER_ADMIN.
+5. Penelitian tidak menyimpulkan kepatuhan terhadap regulasi tertentu kecuali
+  terdapat standar regulasi yang dipilih dan diuji secara eksplisit.
+6. Pengujian anti-tamper file database, penetration test jaringan, dan audit
+  infrastruktur Windows merupakan ruang lingkup tambahan, bukan fitur utama.
+7. Karena aplikasi offline, penelitian tidak menilai sinkronisasi antar-cabang
+  atau multi-terminal real-time.
+
+======================================================================
+28. LANDASAN TEORI
+======================================================================
+
+28.1 Sistem informasi apotek
+
+Sistem informasi apotek adalah sistem yang membantu pengelolaan data obat,
+persediaan, transaksi, pengguna, dan laporan. Dalam penelitian ini, data stok
+obat memiliki hubungan langsung dengan transaksi penjualan, stok masuk, batch,
+expired date, koreksi, dan stok opname.
+
+28.2 Authentication
+
+Authentication adalah proses memverifikasi bahwa seseorang adalah pemilik
+identitas yang digunakan untuk masuk. Pada aplikasi ini, verifikasi dilakukan
+dengan username dan password. Password dibandingkan dengan hash PBKDF2-SHA256,
+bukan dibandingkan dengan plaintext yang disimpan.
+
+28.3 Authorization
+
+Authorization adalah proses menentukan apakah user yang sudah terautentikasi
+boleh melakukan suatu operasi. Dalam aplikasi ini, authorization terlihat pada
+pemeriksaan role dan permission sebelum operasi service dijalankan.
+
+28.4 Role Based Access Control
+
+RBAC memberikan hak akses berdasarkan role, bukan memberikan izin satu per satu
+secara bebas kepada setiap user. Komponen konseptual RBAC adalah:
+
+- user: subjek yang memakai aplikasi;
+- role: kumpulan tanggung jawab, misalnya KARYAWAN atau SUPER_ADMIN;
+- permission: hak menjalankan operasi tertentu;
+- session: konteks user setelah login;
+- operation/resource: fungsi dan data yang hendak diakses.
+
+Relasi sederhananya:
+
+  user -> role -> permission -> operation/resource
+
+Implementasi Firdan Farma menggunakan role sebagai kontrol utama dan dua
+permission flag tambahan untuk stok masuk serta koreksi stok.
+
+28.5 Least privilege
+
+Least privilege berarti user hanya memperoleh hak yang dibutuhkan untuk tugasnya.
+Contoh penerapan pada aplikasi adalah KARYAWAN tidak otomatis dapat mengelola
+akun, melihat audit semua user, melakukan restore, atau membatalkan transaksi.
+
+28.6 Separation of duties
+
+Separation of duties memisahkan aktivitas pelaksana dan pemeriksa. Implementasi
+stok opname memiliki konsep ini melalui pencatat stok fisik dan penyelesaian
+opname oleh Super Admin. Peneliti tetap perlu menguji apakah pemisahan tersebut
+sepenuhnya enforced sesuai kebutuhan organisasi.
+
+28.7 Audit trail
+
+Audit trail adalah catatan kronologis aktivitas yang memungkinkan penelusuran
+peristiwa. Audit yang baik minimal mengandung who, when, what, which object,
+result, dan bila relevan before/after, reason, serta reference.
+
+28.8 Accountability
+
+Accountability adalah kemampuan menghubungkan tindakan dengan identitas pelaku.
+Audit user_id, username, role, created_at, dan referensi transaksi mendukung
+accountability selama database dan waktu sistem dapat dipercaya.
+
+28.9 Integrity dan non-repudiation
+
+Integrity berarti data tidak berubah tanpa terdeteksi. Non-repudiation berarti
+pelaku sulit menyangkal tindakan yang telah dilakukan. Implementasi saat ini
+mendukung histori dan pencatatan, tetapi belum memberikan jaminan penuh karena
+audit berada pada SQLite lokal tanpa hash chain, signature, atau penyimpanan
+eksternal read-only.
+
+28.10 Defense in depth
+
+Defense in depth menggunakan beberapa lapisan kontrol. Pada aplikasi ini,
+lapisannya adalah penyembunyian menu, pemeriksaan service, validasi bisnis,
+constraint database, transaksi SQLite, dan audit trail.
+
+======================================================================
+29. KERANGKA PEMIKIRAN PENELITIAN
+======================================================================
+
+Masukan penelitian:
+- source code aplikasi;
+- skema database;
+- definisi role dan permission;
+- skenario penggunaan;
+- data uji transaksi dan stok;
+- hasil audit log.
+
+Proses analisis:
+1. Identifikasi aktor dan kebutuhan akses.
+2. Pemetaan role ke fitur.
+3. Penelusuran pemeriksaan otorisasi pada UI dan service.
+4. Identifikasi event yang menghasilkan audit.
+5. Pengujian akses positif dan negatif.
+6. Pengujian kelengkapan audit.
+7. Analisis risiko dan batasan.
+
+Keluaran penelitian:
+- matriks RBAC terverifikasi;
+- katalog event audit;
+- hasil pengujian akses;
+- hasil pengukuran kelengkapan audit;
+- temuan kelemahan;
+- rekomendasi penguatan.
+
+Representasi alur:
+
+  Aktor + role
+     |
+     v
+  Pemeriksaan otorisasi ---- gagal ----> akses ditolak
+     |
+    berhasil
+     |
+     v
+  Operasi bisnis + transaksi database
+     |
+     v
+  Audit trail + stock movement + hasil operasi
+
+======================================================================
+30. METODOLOGI PENELITIAN YANG DISARANKAN
+======================================================================
+
+30.1 Jenis penelitian
+
+Pendekatan yang sesuai adalah penelitian deskriptif-evaluatif dengan studi
+kasus. Penelitian mendeskripsikan implementasi yang ada, lalu mengevaluasinya
+berdasarkan kriteria RBAC dan audit trail yang ditetapkan.
+
+30.2 Objek penelitian
+
+Objeknya adalah aplikasi Apotek Firdan Farma, khususnya:
+- Models/AppUser.cs;
+- Services/AuthService.cs;
+- Services/UserService.cs;
+- Services/AuditService.cs;
+- Services/ReportService.cs;
+- Services/MedicineService.cs;
+- Services/TransactionService.cs;
+- Services/StockOpnameService.cs;
+- Services/ExcelBackupService.cs;
+- Data/Database.cs;
+- UI yang menampilkan atau menyembunyikan fitur berdasarkan role.
+
+30.3 Teknik pengumpulan data
+
+1. Observasi aplikasi
+  Mengamati alur login, menu, transaksi, laporan, dan pesan penolakan.
+
+2. Studi dokumentasi
+  Membaca PRD, README, manual penggunaan, source code, schema database, dan
+  dokumen audit yang dihasilkan.
+
+3. Code review terarah
+  Menelusuri definisi role, permission check, pemanggilan AuditService,
+  transaksi database, dan query laporan.
+
+4. Pengujian black-box
+  Memasukkan skenario valid dan tidak valid melalui UI.
+
+5. Pengujian white-box terbatas
+  Memeriksa jalur source code yang mengendalikan authorization dan logging.
+
+6. Analisis database
+  Memeriksa tabel users, audit_logs, stock_movements, sales, purchases, dan
+  stok opname sebelum serta sesudah skenario uji.
+
+30.4 Tahapan penelitian
+
+1. Menentukan masalah dan tujuan.
+2. Mengumpulkan teori RBAC, audit trail, accountability, least privilege,
+  dan pengujian keamanan.
+3. Menginventarisasi role, permission, fitur, dan audit action.
+4. Menyusun matriks traceability.
+5. Menyiapkan database uji dan data uji.
+6. Menjalankan pengujian akses dan transaksi.
+7. Mengumpulkan hasil UI, exception, audit_logs, dan stock_movements.
+8. Menghitung hasil evaluasi.
+9. Menganalisis kesesuaian, kekurangan, dan risiko.
+10. Menyusun kesimpulan serta rekomendasi.
+
+======================================================================
+31. INSTRUMEN PENELITIAN
+======================================================================
+
+31.1 Instrumen matriks akses
+
+Kolom yang disarankan:
+- nomor;
+- role;
+- fitur;
+- operasi;
+- akses yang diharapkan;
+- akses aktual;
+- titik enforcement;
+- hasil uji;
+- bukti;
+- catatan.
+
+31.2 Instrumen audit event
+
+Kolom yang disarankan:
+- nomor;
+- skenario;
+- action yang diharapkan;
+- action aktual;
+- user_id;
+- username;
+- role;
+- waktu;
+- entity;
+- entity_id;
+- old_value;
+- new_value;
+- reason;
+- status;
+- transaction_code;
+- kesimpulan.
+
+31.3 Instrumen pengujian
+
+Kolom yang disarankan:
+- ID test;
+- prasyarat;
+- langkah pengujian;
+- input;
+- expected result;
+- actual result;
+- status PASS/FAIL;
+- bukti screenshot atau query;
+- komentar.
+
+======================================================================
+32. OPERATIONAL DEFINITION DAN INDIKATOR EVALUASI
+======================================================================
+
+32.1 Indikator RBAC
+
+A. Role validity
+  Role yang diterima sistem hanya role yang telah didefinisikan.
+
+B. Access separation
+  Fitur administratif dan sensitif tidak dapat digunakan KARYAWAN.
+
+C. Service enforcement
+  Akses tetap ditolak walaupun UI dilewati atau method dipanggil langsung.
+
+D. Permission accuracy
+  can_purchase dan can_adjust_stock menghasilkan hak efektif sesuai nilai
+  permission, sedangkan SUPER_ADMIN memperoleh override sesuai desain.
+
+E. Session validity
+  User null atau akun nonaktif tidak dapat menjalankan operasi yang dilindungi.
+
+F. Least privilege
+  KARYAWAN tidak memperoleh akses administratif yang tidak dibutuhkan.
+
+32.2 Indikator audit trail
+
+A. Completeness
+  Event penting menghasilkan catatan audit.
+
+B. Identity
+  Catatan memuat user_id, username, dan role bila identitas tersedia.
+
+C. Time
+  Catatan memuat created_at.
+
+D. Action and object
+  Catatan memuat action, entity, dan entity_id bila tersedia.
+
+E. Before-after
+  Perubahan penting memuat old_value dan new_value bila implementasi
+  menyediakan snapshot.
+
+F. Context
+  Catatan memuat alasan, notes, nominal, diskon, pembayaran, batch, atau qty
+  sesuai konteks event.
+
+G. Status
+  Catatan membedakan BERHASIL dan GAGAL pada event yang didukung.
+
+H. Traceability
+  Audit dapat dihubungkan ke transaksi melalui transaction_code atau entity_id.
+
+I. Consistency
+  Audit operasi bisnis berhasil tersimpan atau rollback bersama transaksi.
+
+J. Reviewability
+  Super Admin dapat memfilter dan mengekspor aktivitas untuk pemeriksaan.
+
+======================================================================
+33. FORMULA PENGUKURAN
+======================================================================
+
+Peneliti dapat memakai formula berikut. Formula ini adalah metode evaluasi yang
+disarankan, bukan nilai yang sudah dihitung oleh aplikasi.
+
+33.1 Persentase keberhasilan kontrol akses
+
+  Persentase = (jumlah uji akses sesuai harapan / total uji akses) x 100%
+
+Contoh: dari 20 skenario akses, 19 sesuai harapan, maka nilai = 95%.
+
+33.2 Persentase kelengkapan audit
+
+  Kelengkapan = (jumlah atribut audit yang tersedia /
+            jumlah atribut audit yang dipersyaratkan) x 100%
+
+Penghitungan harus dilakukan per kategori event karena tidak semua atribut
+relevan untuk setiap event. Contoh, payment_method relevan untuk penjualan,
+tetapi tidak wajib untuk perubahan akun.
+
+33.3 Persentase keterlacakan transaksi
+
+  Keterlacakan = (jumlah event yang dapat dihubungkan ke transaksi atau entitas /
+            total event yang diuji) x 100%
+
+33.4 Persentase konsistensi audit-transaksi
+
+  Konsistensi = (jumlah skenario commit/rollback yang menghasilkan kondisi
+            audit sesuai aturan / total skenario commit/rollback) x 100%
+
+33.5 Skor risiko kualitatif
+
+Setiap temuan dapat diberi nilai:
+- dampak: rendah, sedang, tinggi;
+- kemungkinan: rendah, sedang, tinggi;
+- kemampuan deteksi: mudah, sedang, sulit;
+- prioritas: hasil gabungan penilaian peneliti.
+
+Peneliti wajib menjelaskan kriteria penilaian agar skor dapat dipertanggung-
+jawabkan dan tidak hanya berupa opini.
+
+======================================================================
+34. SKENARIO UJI AKADEMIK TERSTRUKTUR
+======================================================================
+
+R-01 Login valid SUPER_ADMIN
+Prasyarat : akun aktif SUPER_ADMIN tersedia.
+Langkah   : masukkan username/password yang benar.
+Harapan   : login berhasil, menu administratif tampil, LOGIN BERHASIL tercatat.
+
+R-02 Login valid KARYAWAN
+Prasyarat : akun aktif KARYAWAN tersedia.
+Langkah   : masukkan username/password yang benar.
+Harapan   : login berhasil, menu sesuai permission tampil.
+
+R-03 Password salah
+Langkah   : gunakan username valid dengan password salah.
+Harapan   : akses ditolak dan LOGIN berstatus GAGAL tercatat.
+
+R-04 Akun nonaktif
+Langkah   : nonaktifkan akun, lalu coba login.
+Harapan   : akses ditolak dan percobaan tercatat.
+
+R-05 KARYAWAN mengakses user management
+Langkah   : coba buka UI atau panggil service pengelolaan user.
+Harapan   : fitur tidak tampil atau operasi ditolak.
+
+R-06 KARYAWAN mengakses audit semua user
+Langkah   : buka Aktivitas dan coba filter user lain atau ReportService.Audit.
+Harapan   : data dibatasi ke user sendiri atau operasi ditolak.
+
+R-07 KARYAWAN tanpa permission koreksi
+Langkah   : can_adjust_stock=0, lalu lakukan koreksi.
+Harapan   : UnauthorizedAccessException atau penolakan UI.
+
+R-08 KARYAWAN dengan permission stok masuk
+Langkah   : can_purchase=1, lalu simpan stok masuk valid.
+Harapan   : transaksi berhasil dan STOK_MASUK tercatat.
+
+R-09 Penjualan dengan diskon
+Langkah   : buat transaksi valid dengan diskon positif.
+Harapan   : PENJUALAN, STOK_KELUAR, dan PEMBERIAN_DISKON tercatat.
+
+R-10 Diskon melebihi subtotal
+Langkah   : masukkan diskon lebih besar dari subtotal.
+Harapan   : transaksi ditolak dan total tidak tersimpan sebagai transaksi final.
+
+R-11 Pembatalan oleh KARYAWAN
+Langkah   : coba batalkan transaksi final.
+Harapan   : ditolak.
+
+R-12 Pembatalan oleh SUPER_ADMIN tanpa alasan
+Langkah   : batalkan transaksi tanpa alasan.
+Harapan   : ditolak.
+
+R-13 Pembatalan oleh SUPER_ADMIN dengan alasan
+Langkah   : batalkan transaksi final dengan alasan.
+Harapan   : status DIBATALKAN, stok kembali, audit tercatat.
+
+R-14 Perubahan master obat oleh KARYAWAN
+Harapan   : ditolak.
+
+R-15 Perubahan master obat oleh SUPER_ADMIN
+Harapan   : berhasil dan old_value/new_value tersedia.
+
+R-16 Koreksi batch tanpa alasan
+Harapan   : ditolak.
+
+R-17 Selisih stok opname tanpa alasan
+Harapan   : posting ditolak.
+
+R-18 Audit rollback
+Langkah   : buat transaksi yang gagal setelah sebagian validasi atau operasi.
+Harapan   : tidak ada audit keberhasilan palsu yang sudah commit.
+
+R-19 Backup dan restore oleh KARYAWAN
+Harapan   : ditolak.
+
+R-20 Backup dan restore oleh SUPER_ADMIN
+Harapan   : backup/safety backup dibuat dan action terkait tercatat sesuai alur.
+
+======================================================================
+35. CONTOH TABEL HASIL PENELITIAN
+======================================================================
+
+Contoh tabel pengujian akses:
+
+ID | Role | Fitur | Expected | Actual | Status | Bukti
+---|------|-------|----------|--------|--------|------
+R01| SUPER_ADMIN | Kelola user | Diizinkan | ... | ... | ...
+R02| KARYAWAN     | Kelola user | Ditolak   | ... | ... | ...
+R03| KARYAWAN     | Penjualan  | Diizinkan | ... | ... | ...
+R04| KARYAWAN     | Audit semua| Ditolak   | ... | ... | ...
+
+Contoh tabel audit:
+
+ID | Skenario | Action | User | Entity | Before/After | Status
+---|----------|--------|------|--------|--------------|-------
+A01| Login    | LOGIN  | ...  | user   | -            | ...
+A02| Jual     | PENJUALAN + STOK_KELUAR | ... | sale/medicine | ... | ...
+A03| Koreksi  | PENYESUAIAN_STOK | ... | medicine | ... | ...
+
+Contoh tabel traceability requirement:
+
+Requirement | Source/Service | Database | Test | Kesimpulan
+------------|----------------|----------|------|-----------
+Login role  | AuthService    | users    | R01-R04 | ...
+Audit jual  | TransactionService/AuditService | audit_logs | R09 | ...
+Audit stok  | MedicineService | stock_movements/audit_logs | R13,R17 | ...
+
+======================================================================
+36. CONTOH NARASI PEMBAHASAN HASIL
+======================================================================
+
+Contoh narasi yang boleh disesuaikan setelah pengujian:
+
+"Berdasarkan penelusuran source code, aplikasi menerapkan dua role utama yaitu
+KARYAWAN dan SUPER_ADMIN. Role SUPER_ADMIN memiliki hak akses administratif,
+sedangkan KARYAWAN memperoleh akses operasional sesuai permission can_purchase
+dan can_adjust_stock. Pengecekan tidak hanya dilakukan pada antarmuka, tetapi
+juga pada service melalui UserService.RequireSuper dan pemeriksaan permission
+efektif. Temuan ini menunjukkan adanya defense in depth pada batas akses
+aplikasi."
+
+"Pada aspek audit trail, pencatatan dipusatkan melalui AuditService.LogDetailed.
+Audit memuat atribut identitas, aksi, entitas, referensi transaksi, nilai
+sebelum, nilai sesudah, alasan, kuantitas, nominal, status, dan waktu sesuai
+konteks event. Pada transaksi penting, audit ditulis menggunakan koneksi dan
+transaksi database yang sama. Dengan demikian, audit keberhasilan mengikuti
+hasil commit transaksi bisnis."
+
+"Namun, hasil analisis juga menunjukkan bahwa audit belum bersifat tamper-
+evident secara kriptografis. Karena audit dan data operasional berada pada
+SQLite lokal, pemilik akses file database masih dapat memodifikasi data di luar
+aplikasi tanpa menghasilkan audit baru. Oleh karena itu, implementasi saat ini
+kuat sebagai mekanisme pencatatan dan pengawasan operasional, tetapi belum
+dapat dianggap sebagai sistem audit terpusat atau bukti non-repudiation penuh."
+
+Narasi di atas harus disesuaikan dengan hasil uji aktual. Jangan menulis
+"semua pengujian berhasil" sebelum tabel hasil penelitian benar-benar diisi.
+
+======================================================================
+37. STRUKTUR BAB SKRIPSI YANG DISARANKAN
+======================================================================
+
+BAB I PENDAHULUAN
+- latar belakang;
+- identifikasi masalah;
+- rumusan masalah;
+- batasan masalah;
+- tujuan penelitian;
+- manfaat penelitian;
+- sistematika penulisan.
+
+BAB II LANDASAN TEORI
+- sistem informasi apotek;
+- keamanan informasi;
+- authentication dan authorization;
+- RBAC;
+- least privilege dan separation of duties;
+- audit trail dan accountability;
+- database SQLite;
+- pengujian black-box dan white-box;
+- penelitian terdahulu;
+- kerangka pemikiran.
+
+BAB III METODOLOGI PENELITIAN
+- jenis dan pendekatan penelitian;
+- objek penelitian;
+- sumber data;
+- teknik pengumpulan data;
+- instrumen penelitian;
+- variabel dan indikator;
+- skenario pengujian;
+- teknik analisis data;
+- jadwal penelitian bila diperlukan.
+
+BAB IV HASIL DAN PEMBAHASAN
+- gambaran aplikasi;
+- arsitektur modul terkait;
+- struktur users dan audit_logs;
+- matriks hak akses;
+- alur login dan authorization;
+- katalog event audit;
+- hasil uji akses;
+- hasil uji audit;
+- pengukuran kelengkapan dan keterlacakan;
+- analisis risiko;
+- perbandingan temuan dengan teori.
+
+BAB V KESIMPULAN DAN SARAN
+- kesimpulan berdasarkan rumusan masalah;
+- ketercapaian tujuan;
+- keterbatasan penelitian;
+- rekomendasi pengembangan;
+- saran penelitian selanjutnya.
+
+======================================================================
+38. VALIDITAS DATA DAN ETIKA PENELITIAN
+======================================================================
+
+Untuk menjaga validitas:
+- gunakan database uji, bukan data pelanggan atau transaksi produksi;
+- catat versi source code dan tanggal pengujian;
+- simpan screenshot atau output query sebagai bukti;
+- ulangi skenario penting minimal dua kali bila memungkinkan;
+- bedakan expected result dan actual result;
+- jangan mengubah audit produksi tanpa prosedur yang disetujui;
+- jangan mencantumkan password asli dalam laporan skripsi;
+- samarkan nama user, nominal sensitif, dan data supplier bila diperlukan;
+- simpan backup sebelum eksperimen database;
+- dokumentasikan kegagalan, bukan hanya hasil yang berhasil.
+
+Penelitian harus menghormati kerahasiaan data operasional apotek. Data yang
+ditampilkan pada lampiran skripsi sebaiknya berupa data dummy atau telah
+di-anonimkan.
+
+======================================================================
+39. KESIMPULAN AKADEMIK SEMENTARA
+======================================================================
+
+Berdasarkan implementasi yang ditelusuri, Firdan Farma dapat dianalisis sebagai
+sistem yang menerapkan RBAC sederhana dengan dua role dan permission tambahan
+untuk aktivitas stok. Kontrol akses telah ditempatkan pada UI dan service,
+sehingga analisis dapat menguji perbedaan antara access hiding dan access
+enforcement.
+
+Audit trail diimplementasikan secara terpusat melalui AuditService dan telah
+mencakup banyak event operasional penting. Atribut audit mendukung identifikasi
+pelaku, waktu, aksi, entitas, referensi, perubahan nilai, kuantitas, nominal,
+alasan, dan status. Hubungan audit dengan transaksi serta stock movement dapat
+digunakan sebagai dasar analisis traceability.
+
+Kesimpulan final penelitian tetap harus dibuat setelah pengujian empiris.
+Dokumentasi source code saja belum cukup untuk menyatakan seluruh skenario
+berhasil, tingkat efektivitas tertentu, atau kepatuhan terhadap standar
+eksternal. Nilai persentase, tabel hasil, dan klaim efektivitas harus berasal
+dari data penelitian yang benar-benar dikumpulkan.
+
+======================================================================
+AKHIR DOKUMEN BAHAN RISET SKRIPSI
+======================================================================
