@@ -49,5 +49,79 @@ FROM users WHERE username=@u", c))
         {
             if (user != null) AuditService.LogDetailed(user, "LOGOUT", "user", user.Id, null, null, null, null, null, null, null, "Keluar aplikasi");
         }
+
+        public static void ResetPasswordWithOldPassword(string username, string oldPassword, string newPassword, string confirmPassword)
+        {
+            username = (username ?? "").Trim();
+            oldPassword = oldPassword ?? "";
+            newPassword = newPassword ?? "";
+            confirmPassword = confirmPassword ?? "";
+
+            if (string.IsNullOrWhiteSpace(username))
+                throw new InvalidOperationException("Username wajib diisi.");
+            if (string.IsNullOrWhiteSpace(oldPassword))
+                throw new InvalidOperationException("Password sebelumnya wajib diisi.");
+            if (string.IsNullOrWhiteSpace(newPassword))
+                throw new InvalidOperationException("Password baru wajib diisi.");
+            if (newPassword.Length < 6)
+                throw new InvalidOperationException("Password baru minimal 6 karakter.");
+            if (newPassword != confirmPassword)
+                throw new InvalidOperationException("Konfirmasi password baru tidak cocok.");
+            if (oldPassword == newPassword)
+                throw new InvalidOperationException("Password baru tidak boleh sama dengan password sebelumnya.");
+
+            using (var c = Database.Open())
+            using (var tx = c.BeginTransaction())
+            {
+                long userId = 0;
+                string displayName = null;
+                string role = null;
+                string currentHash = null;
+                bool userFound = false;
+
+                using (var cmd = new SQLiteCommand("SELECT id, username, display_name, role, password_hash, is_active FROM users WHERE username=@u", c, tx))
+                {
+                    cmd.Parameters.AddWithValue("@u", username);
+                    using (var r = cmd.ExecuteReader())
+                    {
+                        if (r.Read() && Convert.ToInt32(r["is_active"]) == 1)
+                        {
+                            userFound = true;
+                            userId = Convert.ToInt64(r["id"]);
+                            displayName = Convert.ToString(r["display_name"]);
+                            role = Convert.ToString(r["role"]);
+                            currentHash = Convert.ToString(r["password_hash"]);
+                        }
+                    }
+                }
+
+                if (!userFound)
+                {
+                    AuditService.LogDetailed(null, "RESET_PASSWORD", "user", null, null, null, null, null, null, null, "Username tidak ditemukan/nonaktif", "Reset password gagal", "GAGAL", null, null, 0, 0, c, tx, username, null);
+                    tx.Commit();
+                    throw new InvalidOperationException("Username tidak ditemukan atau akun nonaktif.");
+                }
+
+                if (!PasswordHasher.Verify(oldPassword, currentHash))
+                {
+                    AuditService.LogDetailed(null, "RESET_PASSWORD", "user", userId, username, null, null, null, null, null, "Password sebelumnya salah", "Reset password gagal", "GAGAL", null, null, 0, 0, c, tx, username, role);
+                    tx.Commit();
+                    throw new InvalidOperationException("Password sebelumnya salah.");
+                }
+
+                var now = DateTime.Now.ToString("s");
+                using (var updateCmd = new SQLiteCommand("UPDATE users SET password_hash=@p, updated_at=@now WHERE id=@id", c, tx))
+                {
+                    updateCmd.Parameters.AddWithValue("@p", PasswordHasher.Hash(newPassword));
+                    updateCmd.Parameters.AddWithValue("@now", now);
+                    updateCmd.Parameters.AddWithValue("@id", userId);
+                    updateCmd.ExecuteNonQuery();
+                }
+
+                var dummyUser = new AppUser { Id = userId, Username = username, DisplayName = displayName, Role = role };
+                AuditService.LogDetailed(dummyUser, "RESET_PASSWORD", "user", userId, username, null, "Password berhasil diperbarui via verifikasi password sebelumnya", null, null, null, null, "Reset password berhasil", "BERHASIL", null, null, 0, 0, c, tx);
+                tx.Commit();
+            }
+        }
     }
 }
