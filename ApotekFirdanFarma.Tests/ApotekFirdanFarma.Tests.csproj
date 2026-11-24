@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>ApotekFirdanFarma.Tests</RootNamespace>
+    <AssemblyName>ApotekFirdanFarma.Tests</AssemblyName>
+    <Platforms>AnyCPU</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- Moq 4.18.4: versi 4.20.0 memuat SponsorLink (dicabut di 4.20.2); versi dipin supaya hasil build konsisten. -->
+    <PackageReference Include="Moq" Version="4.18.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ApotekFirdanFarma.csproj" />
+  </ItemGroup>
+</Project>

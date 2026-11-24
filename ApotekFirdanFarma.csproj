@@ -23,4 +23,13 @@
   <ItemGroup>
     <EmbeddedResource Include="Data\initial_medicines.csv" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="ApotekFirdanFarma.Tests\**" />
+    <EmbeddedResource Remove="ApotekFirdanFarma.Tests\**" />
+    <None Remove="ApotekFirdanFarma.Tests\**" />
+    <InternalsVisibleTo Include="ApotekFirdanFarma.Tests" />
+    <!-- Dibutuhkan Moq (Castle DynamicProxy) agar bisa membuat mock untuk interface internal -->
+    <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+  </ItemGroup>
+
 </Project>
